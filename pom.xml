@@ -1,17 +1,88 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>org.example</groupId>
-    <artifactId>High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine</artifactId>
-    <version>1.0-SNAPSHOT</version>
+    <!-- ============================================================
+         PARENT: we inherit Spring Boot's "starter parent", which imports
+         the Spring Boot BOM (Bill of Materials) — a huge, curated list of
+         mutually-compatible dependency versions. Because of it, when we
+         later add spring-kafka, spring-data-redis, etc., we DON'T write
+         version numbers: Spring Boot already knows a set that's tested to
+         work together. Pin one version here; the whole tree stays aligned.
+         ============================================================ -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.5.16</version>
+        <relativePath/> <!-- empty = resolve from Maven Central, not a local folder -->
+    </parent>
+
+    <!-- Our project's own coordinates. artifactId=geopulse is the root/parent. -->
+    <groupId>com.geopulse</groupId>
+    <artifactId>geopulse</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+
+    <!-- packaging=pom => this module produces NO jar. It's an "aggregator":
+         its only job is to tie the child modules together and push shared
+         config/versions down to them. -->
+    <packaging>pom</packaging>
+
+    <name>GeoPulse</name>
+    <description>High-concurrency location tracking &amp; spatial ingestion engine</description>
+
+    <!-- The child modules. Running `mvn install` HERE builds all of them.
+         Maven reads the dependency graph and builds in the correct order —
+         `common` first, because the services depend on it. -->
+    <modules>
+        <module>common</module>
+        <module>ingestion-service</module>
+        <module>processing-service</module>
+        <module>query-service</module>
+    </modules>
 
     <properties>
-        <maven.compiler.source>19</maven.compiler.source>
-        <maven.compiler.target>19</maven.compiler.target>
+        <java.version>21</java.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
 
+    <!-- ============================================================
+         dependencyManagement vs dependencies — the #1 Maven confusion:
+
+         <dependencyManagement> = "IF a child declares this dependency,
+             use THIS version." It sets version POLICY but adds nothing to
+             any module on its own. Perfect for centralizing versions.
+
+         <dependencies> (below) = every child inherits these
+             UNCONDITIONALLY. Reserve it for truly universal things.
+         ============================================================ -->
+    <dependencyManagement>
+        <dependencies>
+            <!-- Register our own common module here so the 3 services can
+                 depend on it WITHOUT repeating the version each time. -->
+            <dependency>
+                <groupId>com.geopulse</groupId>
+                <artifactId>geopulse-common</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <!-- Dependencies EVERY module gets. Keep this list tiny. -->
+    <dependencies>
+        <!-- Lombok: removes getter/setter/builder boilerplate. `provided`
+             = needed to compile, but NOT shipped inside the final jar. -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <!-- JUnit 5 + Mockito + AssertJ — the whole test toolkit, test-only. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
 </project>

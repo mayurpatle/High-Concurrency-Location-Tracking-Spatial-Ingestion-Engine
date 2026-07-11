@@ -1,0 +1,28 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: ingestion-service
+  kafka:
+    bootstrap-servers: localhost:9092   # the PLAINTEXT_HOST listener from Part 2
+  threads:
+    virtual:
+      enabled: true
+
+
+# Actuator: expose only health + info for now (the /prometheus endpoint needs an
+# extra dependency we add in Phase 6, so we don't list it yet).
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always   # show per-component status (dev convenience)
+
+# Our tunable quality-gate threshold (3b)
+geopulse:
+  ingestion:
+    max-accuracy-metres: 100.0

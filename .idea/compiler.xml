@@ -6,8 +6,19 @@
         <sourceOutputDir name="target/generated-sources/annotations" />
         <sourceTestOutputDir name="target/generated-test-sources/test-annotations" />
         <outputRelativeToContentRoot value="true" />
-        <module name="High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine" />
+        <module name="processing-service" />
+        <module name="geopulse-common" />
+        <module name="ingestion-service" />
+        <module name="query-service" />
       </profile>
     </annotationProcessing>
+  </component>
+  <component name="JavacSettings">
+    <option name="ADDITIONAL_OPTIONS_OVERRIDE">
+      <module name="geopulse-common" options="-parameters" />
+      <module name="ingestion-service" options="-parameters" />
+      <module name="processing-service" options="-parameters" />
+      <module name="query-service" options="-parameters" />
+    </option>
   </component>
 </project>

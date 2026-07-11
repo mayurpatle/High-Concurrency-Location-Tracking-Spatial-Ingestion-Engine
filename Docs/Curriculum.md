@@ -19,10 +19,10 @@ Legend: ✅ done · 🔜 next · ⬜ planned
 
 ### Phase 0 — Foundations & capacity math
 - ✅ **0.1 · [Foundations & Capacity Math](phase-0-session-1-foundations-and-capacity-math.md)** — requirements, back-of-envelope capacity, API contract, SLOs
-- 🔜 0.2 · Local stack (Docker Compose: Kafka, Redis, Cassandra, Prometheus/Grafana) + Maven scaffolding
+- ✅ 0.2 · Local stack (Docker Compose: Kafka, Redis, Cassandra, Prometheus/Grafana) + Maven scaffolding
 
 ### Phase 1 — Ingestion layer *(getting pings in)*
-- ⬜ 1.1 · The ping endpoint, DTO + validation, domain model, non-blocking design
+- ✅ 1.1 · The ping endpoint, DTO + validation, domain model, non-blocking design
 - ⬜ 1.2 · H3 integration — lat/lng → cell ID at the edge (resolutions, why hexagons, k-rings)
 - ⬜ 1.3 · Kafka producer + the partitioning decision, idempotency keys, ordering
 

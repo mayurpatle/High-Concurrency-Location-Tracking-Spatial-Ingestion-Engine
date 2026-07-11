@@ -1,0 +1,155 @@
+name: geopulse   # sets the Compose project name -> containers become geopulse-kafka-1, etc.
+
+services:
+  # ============================================================
+  #  KAFKA  — single-node, KRaft combined mode (broker + controller)
+  # ============================================================
+  kafka:
+    image: apache/kafka:4.2.0        # pinned, not :latest — reproducible builds
+    ports:
+      - "9092:9092"                  # host apps (our Spring services) connect here
+    environment:
+      # ---- KRaft node identity & controller quorum ----
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller     # ONE process, both roles (dev) but in prod we need to seperate this  out it into 2 machines
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093 # in prodn this  would  be  3 ( 1 , 2 3  )
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+
+      # ---- Listeners: THE thing everyone gets wrong (read the note below) ----
+      # Two client listeners, because clients live in two different networks:
+      #   PLAINTEXT      -> reached by other CONTAINERS via the service name "kafka"
+      #   PLAINTEXT_HOST -> reached by apps on your HOST via "localhost"
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+
+      # ---- Single-broker overrides (see "the RF footgun" note) ----
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1   # in prod   the rep factor  would  be  3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1 # in prod  the  log  replication factor  will be  three
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1  # in prod the  isr  will be   2
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0    # dev: don't wait before rebalancing
+
+      # ---- Storage ----
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk   # fixed id so the data volume survives restarts
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks:
+      - geopulse-net
+    healthcheck:
+      # marks the container "healthy" only once the broker actually accepts connections
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # ============================================================
+  #  KAFKA UI  — browser view of topics, partitions, messages, lag
+  # ============================================================
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:latest   # maintained fork of the old provectus UI
+    ports:
+      - "8080:8080"                          # open http://localhost:8080
+    environment:
+      DYNAMIC_CONFIG_ENABLED: "true"
+      KAFKA_CLUSTERS_0_NAME: geopulse-local
+      # UI is a CONTAINER, so it uses the INTERNAL listener (service name + 29092)
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+    depends_on:
+      kafka:
+        condition: service_healthy   # wait for Kafka to be healthy, not just started
+    networks:
+      - geopulse-net
+
+  # ============================================================
+  #  REDIS  — hot tier: current location only, ephemeral, TTL-driven
+  # ============================================================
+  redis:
+    image: redis:8-alpine                              # tiny; alpine base keeps it lean
+    command: ["redis-server", "--appendonly", "yes"]   # AOF on: survive dev restarts
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - geopulse-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]               # healthy once it answers PONG
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ============================================================
+  #  CASSANDRA  — cold tier: durable location history, write-optimized (LSM-tree)
+  # ============================================================
+  cassandra:
+    image: cassandra:5.0
+    ports:
+      - "9042:9042"                    # CQL native transport — our Java client connects here
+    environment:
+      CASSANDRA_CLUSTER_NAME: geopulse-cluster
+      CASSANDRA_DC: datacenter1        # <-- REMEMBER THIS: our Spring client's local-datacenter must match
+      CASSANDRA_RACK: rack1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      # Cap the JVM, or Cassandra grabs ~1/4 of your host RAM by default and starves everything else.
+      MAX_HEAP_SIZE: 1G
+      HEAP_NEWSIZE: 256M
+    volumes:
+      - cassandra-data:/var/lib/cassandra
+    networks:
+      - geopulse-net
+    healthcheck:
+      # a light query that still exercises the whole stack; note the generous start_period
+      test: ["CMD-SHELL", "cqlsh -e 'describe keyspaces' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s                # Cassandra boots SLOWLY (~60–90s). This is normal, not a hang.
+
+
+  # ============================================================
+  #  PROMETHEUS  — pull-based metrics collector + time-series DB
+  # ============================================================
+  prometheus:
+    image: prom/prometheus:v3.7.3
+    ports:
+      - "9090:9090"                         # Prometheus UI at http://localhost:9090
+    volumes:
+      # mount our scrape config (we create this file next) READ-ONLY into the container
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus         # persist the scraped time-series
+    networks:
+      - geopulse-net
+
+  # ============================================================
+  #  GRAFANA  — dashboards on top of Prometheus
+  # ============================================================
+  grafana:
+    image: grafana/grafana:12.3.0
+    ports:
+      - "3000:3000"                         # Grafana UI at http://localhost:3000
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin     # dev only — fine locally, never in prod
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana       # persist dashboards + settings
+    depends_on:
+      - prometheus
+    networks:
+      - geopulse-net
+
+volumes:
+  kafka-data:
+  redis-data:
+  cassandra-data:
+  prometheus-data:
+  grafana-data:
+
+
+
+networks:
+  geopulse-net:
+    driver: bridge   # shared network; Redis/Cassandra/etc. will join it in Parts 3–4

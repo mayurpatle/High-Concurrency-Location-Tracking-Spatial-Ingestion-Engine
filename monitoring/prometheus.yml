@@ -1,0 +1,26 @@
+# monitoring/prometheus.yml
+global:
+  scrape_interval: 15s          # how often to pull /metrics from every target
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Prometheus scraping ITSELF — a sanity target that's always available,
+  # so you can confirm the whole pull mechanism works before any app is up.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # --- Our services (commented out until they exist in Phase 1+) ---
+  # Spring Boot exposes metrics at /actuator/prometheus. These run on the HOST,
+  # so from inside the Prometheus CONTAINER we reach the host via the special
+  # DNS name host.docker.internal (NOT localhost — that would mean the container).
+  #
+  # - job_name: ingestion-service
+  #   metrics_path: /actuator/prometheus
+  #   static_configs:
+  #     - targets: ["host.docker.internal:8081"]
+  #
+  # - job_name: processing-service
+  #   metrics_path: /actuator/prometheus
+  #   static_configs:
+  #     - targets: ["host.docker.internal:8082"]

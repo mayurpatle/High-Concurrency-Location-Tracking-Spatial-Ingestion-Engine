@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- Point back at the parent. This is how the module inherits the BOM,
+         the shared <dependencies> (lombok, test), java.version, etc. -->
+    <parent>
+        <groupId>com.geopulse</groupId>
+        <artifactId>geopulse</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <!-- Only artifactId is needed; groupId + version are inherited. -->
+    <artifactId>geopulse-common</artifactId>
+
+    <!-- packaging=jar (the default) => a plain library jar. THE key contrast
+         with the services: common is NOT a runnable app. No main(), and
+         crucially NO spring-boot-maven-plugin. Just shared classes. -->
+    <packaging>jar</packaging>
+
+    <name>geopulse-common</name>
+    <description>Shared domain model, DTOs, H3 utilities, and constants</description>
+
+    <dependencies>
+        <!-- H3: Uber's hexagonal geospatial index. Lives here because the H3
+             helper is shared; the services get it TRANSITIVELY via common.
+             Not in the Spring Boot BOM, so we pin the version explicitly. -->
+        <dependency>
+            <groupId>com.uber</groupId>
+            <artifactId>h3</artifactId>
+            <version>4.4.0</version>
+        </dependency>
+
+        <!-- Bean Validation annotations (@NotNull, @Min...) for our DTOs.
+             Version managed by the Spring Boot BOM => no <version> here. -->
+        <dependency>
+            <groupId>jakarta.validation</groupId>
+            <artifactId>jakarta.validation-api</artifactId>
+        </dependency>
+
+        <!-- Jackson annotations (@JsonProperty...) so our models control their
+             JSON shape without dragging in the full Spring web stack. -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-annotations</artifactId>
+        </dependency>
+    </dependencies>
+</project>
