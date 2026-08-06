@@ -2,6 +2,8 @@ package com.geopulse.ingestion.service;
 
 import com.geopulse.common.dto.LocationPingRequest;
 import com.geopulse.common.model.LocationPing;
+import com.geopulse.common.spatial.H3IndexService;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -21,7 +23,11 @@ import org.springframework.stereotype.Service;
  */
 @Service
 @Slf4j
+@RequiredArgsConstructor
 public class LocationIngestionService {
+
+    private final H3IndexService h3IndexService  ;
+
 
     /**
      * Accept one validated ping.
@@ -37,6 +43,8 @@ public class LocationIngestionService {
      */
     @Value("${geopulse.ingestion.max-accuracy-metres:100.0}")
     private double maxAccuracyMetres ;
+
+
 
 
     public void ingest(LocationPingRequest request) {
@@ -55,6 +63,17 @@ public class LocationIngestionService {
             return;
         }
 
+
+        // ---- SPATIAL ENRICHMENT ----
+        // "Index space at the edge." Two cells from ONE conversion:
+        //   storage cell (res 9)   -> computed from lat/lng
+        //   partition cell (res 7) -> walked UP the H3 hierarchy from it
+        // Deriving the parent (rather than a 2nd lat/lng conversion) is cheaper
+        // AND guarantees the two can never disagree.
+        String storageCell   = h3IndexService.toStorageCell(request.lat(), request.lng());
+        String partitionCell = h3IndexService.toPartitionCell(storageCell);
+
+        // TODO(1.2): enrich with H3 cell ID  -> index space at the edge
         // Translate: untrusted DTO -> trusted domain object.
         // This is the ONE place the boundary is crossed.
         LocationPing ping = LocationPing.from(
@@ -64,17 +83,21 @@ public class LocationIngestionService {
                 request.timestamp(),
                 request.speed(),
                 request.heading(),
-                request.accuracy()
+                request.accuracy().doubleValue(),
+                storageCell,
+                partitionCell
         );
 
-        // TODO(1.2): enrich with H3 cell ID  -> index space at the edge
+
         // TODO(1.3): publish to Kafka        -> kafkaTemplate.send(TOPIC, key, ping)
+
 
         // Placeholder so we can SEE the pipeline work end-to-end today.
         // NOTE: this log is a deliberate stand-in and MUST die in 1.3.
         // Logging on the hot path at 250k/s would be a self-inflicted DoS —
         // disk I/O per request is exactly the blocking work we're avoiding.
-        log.info("Ingested ping: driver={} lat={} lng={} ts={}",
-                ping.driverId(), ping.lat(), ping.lng(), ping.timestamp());
+        log.info("Ingested ping: driver={} lat={} lng={} h3={} partitionCell={}",
+                ping.driverId(), ping.lat(), ping.lng(), ping.h3Cell(), ping.h3PartitionCell());
+
     }
 }

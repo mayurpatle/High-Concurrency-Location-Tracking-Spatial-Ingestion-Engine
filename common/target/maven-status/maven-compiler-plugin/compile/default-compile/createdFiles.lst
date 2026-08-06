@@ -1,2 +1,4 @@
+com\geopulse\common\spatial\H3IndexService.class
+com\geopulse\common\spatial\H3Resolution.class
 com\geopulse\common\dto\LocationPingRequest.class
 com\geopulse\common\model\LocationPing.class

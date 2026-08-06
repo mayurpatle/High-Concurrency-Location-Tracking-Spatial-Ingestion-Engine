@@ -1,4 +1,5 @@
 D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\ingestion-service\src\main\java\com\geopulse\ingestion\controller\LocationController.java
+D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\ingestion-service\src\main\java\com\geopulse\ingestion\controller\SpatialDebugController.java
 D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\ingestion-service\src\main\java\com\geopulse\ingestion\exception\GlobalExceptionHandler.java
 D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\ingestion-service\src\main\java\com\geopulse\ingestion\IngestionServiceApplication.java
 D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\ingestion-service\src\main\java\com\geopulse\ingestion\service\LocationIngestionService.java

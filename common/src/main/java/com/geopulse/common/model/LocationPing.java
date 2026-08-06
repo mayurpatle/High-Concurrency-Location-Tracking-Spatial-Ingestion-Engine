@@ -24,7 +24,16 @@ public record LocationPing(
 
         Double speed,        // still boxed — these are genuinely OPTIONAL,
         Double heading,      // so null is a meaningful value ("not reported")
-        Double accuracy
+        Double accuracy,
+
+        // H3 res 9 (~0.10 km²) — the fine-grained storage/index key.
+        String h3Cell,
+
+        // H3 res 7 (~5.2 km²) — the coarse routing key. Stored rather than
+        // derived downstream because the Kafka partitioner needs it BEFORE
+        // the message is routed; recomputing it at routing time would be
+        // both wasteful and a chance for the two to disagree.
+        String h3PartitionCell
 ) {
 
     /**
@@ -39,7 +48,7 @@ public record LocationPing(
      * "index space at the ingestion edge" happens right here.
      */
     public static LocationPing from(String driverId, double lat, double lng, long timestamp,
-                                    Double speed, Double heading, Double accuracy) {
-        return new LocationPing(driverId, lat, lng, timestamp, speed, heading, accuracy);
+                                    Double speed, Double heading, Double accuracy , String h3Cell  , String h3PartitionCell) {
+        return new LocationPing(driverId, lat, lng, timestamp, speed, heading, accuracy , h3Cell , h3PartitionCell );
     }
 }
