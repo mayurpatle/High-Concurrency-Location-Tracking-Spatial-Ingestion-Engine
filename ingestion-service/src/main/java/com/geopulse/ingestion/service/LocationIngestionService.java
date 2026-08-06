@@ -3,6 +3,7 @@ package com.geopulse.ingestion.service;
 import com.geopulse.common.dto.LocationPingRequest;
 import com.geopulse.common.model.LocationPing;
 import com.geopulse.common.spatial.H3IndexService;
+import com.geopulse.ingestion.kafka.LocationPingProducer;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -27,6 +28,9 @@ import org.springframework.stereotype.Service;
 public class LocationIngestionService {
 
     private final H3IndexService h3IndexService  ;
+
+    private final LocationPingProducer locationPingProducer  ;
+
 
 
     /**
@@ -90,6 +94,8 @@ public class LocationIngestionService {
 
 
         // TODO(1.3): publish to Kafka        -> kafkaTemplate.send(TOPIC, key, ping)
+
+        locationPingProducer.publish(ping);
 
 
         // Placeholder so we can SEE the pipeline work end-to-end today.

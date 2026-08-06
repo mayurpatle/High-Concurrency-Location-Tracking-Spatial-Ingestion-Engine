@@ -1,5 +1,6 @@
-com\geopulse\ingestion\controller\LocationController.class
+com\geopulse\ingestion\kafka\LocationPingProducer.class
 com\geopulse\ingestion\service\LocationIngestionService.class
 com\geopulse\ingestion\controller\SpatialDebugController.class
 com\geopulse\ingestion\exception\GlobalExceptionHandler.class
 com\geopulse\ingestion\IngestionServiceApplication.class
+com\geopulse\ingestion\controller\LocationController.class

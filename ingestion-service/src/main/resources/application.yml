@@ -6,6 +6,68 @@ spring:
     name: ingestion-service
   kafka:
     bootstrap-servers: localhost:9092   # the PLAINTEXT_HOST listener from Part 2
+    producer:
+      # ---- Serialization ----
+      # Key = H3 partition cell (a String). Value = LocationPing as JSON.
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      spring.json.add.type.headers: false
+
+      # ---- Durability ----
+      # acks=1: wait for the LEADER only, not all replicas.
+      # We accept the small risk of losing a ping during a leader failover
+      # because location data SELF-HEALS — the next ping (4s later) repairs it.
+      # A payments system would use acks=all here, no discussion.
+      acks: all
+
+      # Retry transient failures (leader election, network blips).
+      # Safe to retry aggressively BECAUSE idempotence (below) dedupes.
+      retries: 3
+
+      properties:
+        # ---- Idempotence ----
+        # Prevents duplicates from PRODUCER RETRIES (lost-ack scenario).
+        # NOTE: this is NOT end-to-end exactly-once — consumer redelivery is a
+        # separate problem, solved in Phase 2.2 via driverId+timestamp dedup.
+        enable.idempotence: true
+
+        # ---- Batching: where throughput actually comes from ----
+        # linger.ms=10 lets a message wait up to 10ms to travel with companions.
+        # Costs 10ms (well inside our 50ms p99 budget); at 250k/s that means
+        # hundreds of messages per batch instead of one. Order-of-magnitude win.
+        # The default linger.ms=0 is a THROUGHPUT TRAP — it pays full network
+        # round-trip overhead per message.
+        linger.ms: 10
+
+        # Send when a batch reaches 64KB (default 16KB). Larger batches suit
+        # our small, high-frequency messages.
+        batch.size: 65536
+
+        # ---- Compression (per batch, so it composes with linger.ms) ----
+        # lz4: ~3-5x on our repetitive JSON at very low CPU. gzip compresses
+        # more but burns far more CPU; zstd is the modern middle ground.
+        compression.type: lz4
+
+        # ---- Backpressure ----
+        # Total memory for unsent records. When full, send() BLOCKS rather than
+        # failing — deliberate backpressure: if Kafka can't keep up, we'd rather
+        # slow the ingest edge than silently drop pings or OOM the JVM.
+        buffer.memory: 67108864   # 64MB
+
+        # How long send() may block on a full buffer before throwing.
+        max.block.ms: 5000
+
+          # Don't ship the Java class name in a header. Two reasons:
+          # 1. It couples producer and consumer to identical package structures —
+          #    rename a package and every consumer breaks.
+        # 2. It leaks internals to any non-Java consumer.
+        # We'll configure the consumer with an explicit target type instead.
+        spring.json.add.type.headers: false
+
+      # Our topic name, referenced from code via @Value
+      template:
+        default-topic: driver-location-pings
+
   threads:
     virtual:
       enabled: true
@@ -24,5 +86,7 @@ management:
 
 # Our tunable quality-gate threshold (3b)
 geopulse:
+  kafka:
+    topic: driver-location-pings
   ingestion:
     max-accuracy-metres: 100.0

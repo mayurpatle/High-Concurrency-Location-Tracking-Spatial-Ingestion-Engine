@@ -23,7 +23,7 @@ Legend: ✅ done · 🔜 next · ⬜ planned
 
 ### Phase 1 — Ingestion layer *(getting pings in)*
 - ✅ 1.1 · The ping endpoint, DTO + validation, domain model, non-blocking design
-- ⬜ 1.2 · H3 integration — lat/lng → cell ID at the edge (resolutions, why hexagons, k-rings)
+- ✅ 1.2 · H3 integration — lat/lng → cell ID at the edge (resolutions, why hexagons, k-rings)
 - ⬜ 1.3 · Kafka producer + the partitioning decision, idempotency keys, ordering
 
 ### Phase 2 — Processing layer *(consuming & fanning out)*
