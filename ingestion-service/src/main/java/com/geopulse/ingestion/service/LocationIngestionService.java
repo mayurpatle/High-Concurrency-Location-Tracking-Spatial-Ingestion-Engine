@@ -87,7 +87,7 @@ public class LocationIngestionService {
                 request.timestamp(),
                 request.speed(),
                 request.heading(),
-                request.accuracy().doubleValue(),
+                request.accuracy(),
                 storageCell,
                 partitionCell
         );
