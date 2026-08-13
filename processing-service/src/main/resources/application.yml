@@ -98,3 +98,10 @@ management:
 geopulse:
   kafka:
     topic: driver-location-pings
+  dedup:
+    # How long a dedup key survives. Sized to cover realistic redelivery paths
+    # (rebalance reprocessing = seconds; producer retries = ms) with margin.
+    # NOT absolute: a duplicate arriving later than this slips through — a
+    # deliberate memory-vs-completeness trade.
+    # At 250k/s this is ~75M keys ≈ 5-7GB Redis. Tune down if memory is tight.
+    ttl-seconds: 300

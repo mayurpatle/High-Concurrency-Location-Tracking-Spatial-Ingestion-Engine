@@ -27,7 +27,7 @@ Legend: ✅ done · 🔜 next · ⬜ planned
 - ✅ 1.3 · Kafka producer + the partitioning decision, idempotency keys, ordering
 
 ### Phase 2 — Processing layer *(consuming & fanning out)*
-- ⬜ 2.1 · Consumer groups, parallelism, offset management
+- ✅ 2.1 · Consumer groups, parallelism, offset management
 - ⬜ 2.2 · Idempotency + redelivery/dedupe, error handling, dead-letter topic
 - ⬜ 2.3 · Batch consumption, concurrency, backpressure & throughput tuning
 

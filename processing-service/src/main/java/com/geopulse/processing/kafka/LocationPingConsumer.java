@@ -1,40 +1,28 @@
 package com.geopulse.processing.kafka;
 
 import com.geopulse.common.model.LocationPing;
+import com.geopulse.processing.exception.NonRetryableException;
+import com.geopulse.processing.service.DeduplicationService;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 
 /**
- * Consumes location pings from Kafka.
+ * Consumes location pings.
  *
- * THE correctness property this class relies on:
- * each partition is assigned to exactly ONE thread in the group, and that
- * thread processes its records sequentially in offset order. So this method is
- * EFFECTIVELY SINGLE-THREADED PER PARTITION — and since we key by H3 res-7
- * cell, that means one thread owns all of a neighbourhood's traffic.
- *
- * That's the "partition is your lock" guarantee, and it comes from Kafka's
- * assignment model rather than anything we implement. It's why the regional
- * state we add later needs no synchronization.
+ * Correctness property this relies on: each partition is assigned to exactly
+ * ONE thread, processing records sequentially in offset order. Combined with
+ * our res-7 partition key, one thread owns all of a neighbourhood's traffic.
  */
 @Component
+@RequiredArgsConstructor
 @Slf4j
 public class LocationPingConsumer {
 
-    /**
-     * One record at a time (batch consumption comes in Session 2.3).
-     *
-     * We take the whole ConsumerRecord rather than just the value so we can see
-     * partition and offset — invaluable while learning, and the basis of the
-     * metrics we add in Phase 6.
-     *
-     * IMPORTANT: this method returning normally is what allows the offset to be
-     * committed. Throwing prevents the commit, so the record is redelivered —
-     * that IS our at-least-once mechanism. Never swallow an exception here
-     * unless you genuinely mean "this record is unprocessable, move on."
-     */
+    private final DeduplicationService deduplicationService;
+
     @KafkaListener(
             topics = "${geopulse.kafka.topic}",
             groupId = "${spring.kafka.consumer.group-id}"
@@ -43,26 +31,47 @@ public class LocationPingConsumer {
 
         LocationPing ping = record.value();
 
-        // The ErrorHandlingDeserializer hands us a null value when a message
-        // couldn't be deserialized (the poison-pill guard). Skip it so the
-        // offset advances rather than stalling the partition forever.
-        // Session 2.2 routes these to a dead-letter topic instead of dropping.
+        // A null value means ErrorHandlingDeserializer caught a malformed
+        // message. We now THROW instead of silently returning (as we did in
+        // 2.1) — the error handler routes it to the DLT, where it can be
+        // inspected. A dropped message is a mystery; a quarantined one is a bug
+        // report. NonRetryableException skips retries: bad bytes will never
+        // become valid JSON on the 4th attempt.
         if (ping == null) {
-            log.warn("Skipping undeserializable record at partition={} offset={}",
-                    record.partition(), record.offset());
-            return;
+            throw new NonRetryableException(
+                    "Undeserializable record at partition=" + record.partition()
+                            + " offset=" + record.offset());
         }
 
-        // TODO(Session 2.2): dedupe on driverId + timestamp
-        // TODO(Phase 3):     write current location to Redis
-        // TODO(Phase 4):     append to Cassandra history
+        // Defensive validation. These fields are non-null by construction in
+        // OUR producer — so a violation means either a schema change or a
+        // foreign producer on our topic. Either way, permanently broken.
+        if (ping.driverId() == null || ping.h3Cell() == null) {
+            throw new NonRetryableException(
+                    "Missing required field for offset=" + record.offset());
+        }
 
-        // TEMPORARY — this proves consumption works and makes partition
-        // assignment visible. It dies in Session 2.3, for the same reason the
-        // producer's log did: disk I/O per record on the hot path is exactly
-        // the blocking work this architecture exists to avoid.
-        log.info("partition={} offset={} driver={} h3={} partitionCell={}",
-                record.partition(), record.offset(),
-                ping.driverId(), ping.h3Cell(), ping.h3PartitionCell());
+        // ---- DEDUP ----
+        // Claim BEFORE writing. The tradeoff (see session doc): a crash between
+        // claiming and writing loses this ping, because redelivery is now
+        // suppressed. We accept rare loss over rare duplication, because
+        // location self-heals in 4s while corrupted history does not.
+        if (!deduplicationService.claim(ping.driverId(), ping.timestamp())) {
+            // TODO(Phase 6): counter `pings.deduplicated`. Counting > logging.
+            return;   // already processed — offset still commits, we move on
+        }
+
+        // TODO(Phase 3): write current location to Redis
+        // TODO(Phase 4): append to Cassandra history
+        //
+        // Any exception from those writes propagates. That's INTENTIONAL:
+        // a thrown exception blocks the offset commit and triggers redelivery
+        // (at-least-once), and transient failures get retried with backoff by
+        // DefaultErrorHandler. Catching and swallowing here would silently
+        // convert at-least-once into at-most-once.
+
+        // TEMPORARY — dies in Session 2.3.
+        log.info("partition={} offset={} driver={} h3={}",
+                record.partition(), record.offset(), ping.driverId(), ping.h3Cell());
     }
 }
