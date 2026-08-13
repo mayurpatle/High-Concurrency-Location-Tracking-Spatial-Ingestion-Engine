@@ -77,7 +77,8 @@ public class LocationIngestionService {
         String storageCell   = h3IndexService.toStorageCell(request.lat(), request.lng());
         String partitionCell = h3IndexService.toPartitionCell(storageCell);
 
-        // TODO(1.2): enrich with H3 cell ID  -> index space at the edge
+        // TODO(1.2): enrich with H3 cell ID  -> index space at the edge  - done
+
         // Translate: untrusted DTO -> trusted domain object.
         // This is the ONE place the boundary is crossed.
         LocationPing ping = LocationPing.from(
@@ -93,7 +94,7 @@ public class LocationIngestionService {
         );
 
 
-        // TODO(1.3): publish to Kafka        -> kafkaTemplate.send(TOPIC, key, ping)
+        // TODO(1.3): publish to Kafka        -> kafkaTemplate.send(TOPIC, key, ping) - done
 
         locationPingProducer.publish(ping);
 

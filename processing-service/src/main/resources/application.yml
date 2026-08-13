@@ -62,6 +62,11 @@ spring:
         spring.json.trusted.packages: com.geopulse.common.model
         spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
 
+        # Cooperative rebalancing: only the partitions that MUST move are
+        # revoked; everything else keeps processing. Without this, every
+        # deploy/scale event stops the entire group.
+        partition.assignment.strategy: org.apache.kafka.clients.consumer.CooperativeStickyAssignor
+
       listener:
         # Commit offsets after the listener returns for a batch of records.
         # Since our listener only returns after the write succeeds, this gives us
