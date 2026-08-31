@@ -18,6 +18,8 @@ spring:
       # We accept the small risk of losing a ping during a leader failover
       # because location data SELF-HEALS — the next ping (4s later) repairs it.
       # A payments system would use acks=all here, no discussion.
+      # but acks = 1  does not work for when idempotency is  on so going  with acks  =  all
+
       acks: all
 
       # Retry transient failures (leader election, network blips).

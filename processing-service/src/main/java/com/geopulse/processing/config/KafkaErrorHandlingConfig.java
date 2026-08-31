@@ -3,6 +3,7 @@ package com.geopulse.processing.config;
 import com.geopulse.common.model.LocationPing;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.springframework.beans.factory.annotation.Value;
@@ -68,14 +69,13 @@ public class KafkaErrorHandlingConfig {
     @Bean
     public DefaultErrorHandler errorHandler(KafkaTemplate<Object, Object> dltKafkaTemplate) {
 
-        // ---- Where exhausted / non-retryable records go ----
-        // Republishes the failed record to "<original-topic>.DLT", preserving
-        // key, value and headers, and ADDING headers that describe the failure
-        // (exception class, message, stack trace, original partition/offset).
-        // That metadata is what makes a DLT a bug report rather than a
-        // graveyard of mystery bytes.
+        // Pin the DLT destination EXPLICITLY rather than relying on the framework's
+        // suffix convention, which differs across Spring Kafka versions (.DLT vs -dlt).
+        // The -1 partition means "let Kafka choose": our DLT has fewer partitions than
+        // the main topic, so mirroring the source partition number would fail.
         DeadLetterPublishingRecoverer recoverer =
-                new DeadLetterPublishingRecoverer(dltKafkaTemplate);
+                new DeadLetterPublishingRecoverer(dltKafkaTemplate,
+                        (record, ex) -> new TopicPartition("driver-location-pings-dlt", -1));
 
         // ---- Backoff: give a struggling dependency room to recover ----
         // 1s -> 2s -> 4s, then give up. Immediate retries would ADD load to an
