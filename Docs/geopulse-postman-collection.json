@@ -1,0 +1,876 @@
+{
+  "info": {
+    "name": "GeoPulse — Location Ingestion Engine",
+    "description": "API tests for the High-Concurrency Location Tracking & Spatial Ingestion Engine.\n\nCovers everything built through Phase 2:\n- Health checks (ingestion + processing)\n- Happy path ingestion (202 Accepted)\n- Validation failures (including the Double-vs-double trap)\n- The accuracy quality gate (accept-and-discard)\n- Batch ingestion + size cap\n- H3 spatial debug endpoints (hierarchy + k-ring math)\n- Dedup scenario (requires manual Redis verification)\n\nRun the whole collection with the Collection Runner. Every request has assertions.\n\nPREREQUISITES:\n  docker compose up -d\n  mvn spring-boot:run -pl ingestion-service    (port 8081)\n  mvn spring-boot:run -pl processing-service   (port 8082)",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "ingestionUrl",
+      "value": "http://localhost:8081",
+      "type": "string"
+    },
+    {
+      "key": "processingUrl",
+      "value": "http://localhost:8082",
+      "type": "string"
+    },
+    {
+      "key": "dedupTimestamp",
+      "value": "1719900016000",
+      "type": "string",
+      "description": "FIXED on purpose — the dedup key is driverId+timestamp, so both sends must share it."
+    }
+  ],
+  "item": [
+    {
+      "name": "00 — Health",
+      "item": [
+        {
+          "name": "Ingestion service health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ingestionUrl}}/actuator/health",
+              "host": ["{{ingestionUrl}}"],
+              "path": ["actuator", "health"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('status is UP', () => {",
+                  "    pm.expect(pm.response.json().status).to.eql('UP');",
+                  "});",
+                  "// NOTE: no kafka component here — Spring Boot ships no default",
+                  "// Kafka health indicator. The producer path is proven in kafka-ui."
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Processing service health (Redis + Cassandra)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{processingUrl}}/actuator/health",
+              "host": ["{{processingUrl}}"],
+              "path": ["actuator", "health"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('status is UP', () => pm.expect(body.status).to.eql('UP'));",
+                  "pm.test('redis is UP', () => {",
+                  "    pm.expect(body.components.redis.status).to.eql('UP');",
+                  "});",
+                  "pm.test('cassandra is UP', () => {",
+                  "    pm.expect(body.components.cassandra.status).to.eql('UP');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "01 — Happy path",
+      "item": [
+        {
+          "name": "Valid ping (Bandra, Mumbai)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Fresh millis timestamp so repeated runs are NOT deduped.",
+                  "pm.collectionVariables.set('nowMillis', Date.now());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 Accepted — not 200 OK', () => {",
+                  "    pm.response.to.have.status(202);",
+                  "});",
+                  "pm.test('body is empty (status code IS the response)', () => {",
+                  "    pm.expect(pm.response.text().trim()).to.eql('');",
+                  "});",
+                  "pm.test('responds under 50ms (p99 SLO)', () => {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(50);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"driverId\": \"driver-001\",\n  \"lat\": 19.0596,\n  \"lng\": 72.8295,\n  \"timestamp\": {{nowMillis}},\n  \"speed\": 12.5,\n  \"heading\": 270.0,\n  \"accuracy\": 5.0\n}"
+            },
+            "url": {
+              "raw": "{{ingestionUrl}}/v1/locations",
+              "host": ["{{ingestionUrl}}"],
+              "path": ["v1", "locations"]
+            }
+          }
+        },
+        {
+          "name": "Valid ping — optional fields omitted",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.collectionVariables.set('nowMillis', Date.now());"]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 — speed/heading/accuracy are OPTIONAL', () => {",
+                  "    pm.response.to.have.status(202);",
+                  "});",
+                  "// Regression guard: an absent accuracy once caused an NPE via",
+                  "// auto-unboxing (request.accuracy().doubleValue()). Absent != bad."
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"driverId\": \"driver-002\",\n  \"lat\": 19.1136,\n  \"lng\": 72.8697,\n  \"timestamp\": {{nowMillis}}\n}"
+            },
+            "url": {
+              "raw": "{{ingestionUrl}}/v1/locations",
+              "host": ["{{ingestionUrl}}"],
+              "path": ["v1", "locations"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "02 — Validation failures",
+      "item": [
+        {
+          "name": "MISSING lat — the Double-vs-double trap",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
+                  "const body = pm.response.json();",
+                  "pm.test('names the offending field', () => {",
+                  "    pm.expect(body.fields.lat).to.include('required');",
+                  "});",
+                  "pm.test('no stack trace leaked', () => {",
+                  "    pm.expect(pm.response.text()).to.not.include('Exception');",
+                  "    pm.expect(pm.response.text()).to.not.include('com.geopulse');",
+                  "});",
+                  "// THE POINT: with a primitive `double lat`, Jackson would default",
+                  "// this to 0.0 — a VALID latitude (Gulf of Guinea) — and it would",
+                  "// pass range validation as a real location. Silent corruption.",
+                  "// The Double wrapper stays null so @NotNull can catch it."
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"driverId\": \"driver-001\",\n  \"lng\": 72.8295,\n  \"timestamp\": 1719900000000\n}"
+            },
+            "url": {
+              "raw": "{{ingestionUrl}}/v1/locations",
+              "host": ["{{ingestionUrl}}"],
+              "path": ["v1", "locations"]
+            }
+          }
+        },
+        {
+          "name": "lat out of range (200.0)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
+                  "pm.test('range bound reported', () => {",
+                  "    pm.expect(pm.response.json().fields.lat).to.include('90');",
+                  "});",
+                  "// Different code path from @NotNull — this is @DecimalMax."
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"driverId\": \"driver-001\",\n  \"lat\": 200.0,\n  \"lng\": 72.8295,\n  \"timestamp\": 1719900000000\n}"
+            },
+            "url": {
+              "raw": "{{ingestionUrl}}/v1/locations",
+              "host": ["{{ingestionUrl}}"],
+              "path": ["v1", "locations"]
+            }
+          }
+        },
+        {
+          "name": "lng out of range (-500.0)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
+                  "pm.test('lng flagged', () => {",
+                  "    pm.expect(pm.response.json().fields).to.have.property('lng');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"driverId\": \"driver-001\",\n  \"lat\": 19.0596,\n  \"lng\": -500.0,\n  \"timestamp\": 1719900000000\n}"
+            },
+            "url": {
+              "raw": "{{ingestionUrl}}/v1/locations",
+              "host": ["{{ingestionUrl}}"],
+              "path": ["v1", "locations"]
+            }
+          }
+        },
+        {
+          "name": "blank driverId",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
+                  "pm.test('driverId flagged', () => {",
+                  "    pm.expect(pm.response.json().fields).to.have.property('driverId');",
+                  "});",
+                  "// @NotBlank rejects null, \"\" AND \"   \" — a ping without a",
+                  "// driver is meaningless."
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"driverId\": \"   \",\n  \"lat\": 19.0596,\n  \"lng\": 72.8295,\n  \"timestamp\": 1719900000000\n}"
+            },
+            "url": {
+              "raw": "{{ingestionUrl}}/v1/locations",
+              "host": ["{{ingestionUrl}}"],
+              "path": ["v1", "locations"]
+            }
+          }
+        },
+        {
+          "name": "negative speed",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
+                  "pm.test('speed flagged', () => {",
+                  "    pm.expect(pm.response.json().fields).to.have.property('speed');",
+                  "});",
+                  "// Optional fields are still VALIDATED when present."
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"driverId\": \"driver-001\",\n  \"lat\": 19.0596,\n  \"lng\": 72.8295,\n  \"timestamp\": 1719900000000,\n  \"speed\": -5.0\n}"
+            },
+            "url": {
+              "raw": "{{ingestionUrl}}/v1/locations",
+              "host": ["{{ingestionUrl}}"],
+              "path": ["v1", "locations"]
+            }
+          }
+        },
+        {
+          "name": "heading > 360",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
+                  "pm.test('heading flagged', () => {",
+                  "    pm.expect(pm.response.json().fields).to.have.property('heading');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"driverId\": \"driver-001\",\n  \"lat\": 19.0596,\n  \"lng\": 72.8295,\n  \"timestamp\": 1719900000000,\n  \"heading\": 400.0\n}"
+            },
+            "url": {
+              "raw": "{{ingestionUrl}}/v1/locations",
+              "host": ["{{ingestionUrl}}"],
+              "path": ["v1", "locations"]
+            }
+          }
+        },
+        {
+          "name": "malformed JSON",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
+                  "pm.test('generic message — parser internals NOT echoed', () => {",
+                  "    pm.expect(pm.response.json().error).to.include('Malformed');",
+                  "    pm.expect(pm.response.text()).to.not.include('Jackson');",
+                  "});",
+                  "// Handled by HttpMessageNotReadableException, not @Valid."
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"driverId\": \"driver-001\", \"lat\": "
+            },
+            "url": {
+              "raw": "{{ingestionUrl}}/v1/locations",
+              "host": ["{{ingestionUrl}}"],
+              "path": ["v1", "locations"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "03 — Quality gate (accept & discard)",
+      "item": [
+        {
+          "name": "accuracy 500m — ACCEPTED but dropped",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.collectionVariables.set('nowMillis', Date.now());"]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 — client did nothing wrong', () => {",
+                  "    pm.response.to.have.status(202);",
+                  "});",
+                  "// MANUAL CHECK: this ping must NOT reach Kafka.",
+                  "// Open kafka-ui -> driver-location-pings -> Messages and confirm",
+                  "// no message for this driverId. We return 202 because the JSON is",
+                  "// perfectly valid — making the client retry would be pointless",
+                  "// churn. Safe because location data self-heals in ~4 seconds."
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"driverId\": \"driver-lowaccuracy\",\n  \"lat\": 19.0596,\n  \"lng\": 72.8295,\n  \"timestamp\": {{nowMillis}},\n  \"accuracy\": 500.0\n}"
+            },
+            "url": {
+              "raw": "{{ingestionUrl}}/v1/locations",
+              "host": ["{{ingestionUrl}}"],
+              "path": ["v1", "locations"]
+            }
+          }
+        },
+        {
+          "name": "accuracy 99m — just under threshold, PASSES",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.collectionVariables.set('nowMillis', Date.now());"]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 Accepted', () => pm.response.to.have.status(202));",
+                  "// Boundary test against geopulse.ingestion.max-accuracy-metres=100.",
+                  "// This one SHOULD reach Kafka."
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"driverId\": \"driver-boundary\",\n  \"lat\": 19.0596,\n  \"lng\": 72.8295,\n  \"timestamp\": {{nowMillis}},\n  \"accuracy\": 99.0\n}"
+            },
+            "url": {
+              "raw": "{{ingestionUrl}}/v1/locations",
+              "host": ["{{ingestionUrl}}"],
+              "path": ["v1", "locations"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "04 — Batch ingestion",
+      "item": [
+        {
+          "name": "Valid batch of 3 (different neighbourhoods)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const now = Date.now();",
+                  "pm.collectionVariables.set('t1', now);",
+                  "pm.collectionVariables.set('t2', now + 1000);",
+                  "pm.collectionVariables.set('t3', now + 2000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 for the whole batch', () => {",
+                  "    pm.response.to.have.status(202);",
+                  "});",
+                  "// MANUAL CHECK: in kafka-ui these 3 should land on DIFFERENT",
+                  "// partitions — Bandra, Andheri and Colaba are different res-7",
+                  "// cells, so they route independently."
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "[\n  {\"driverId\":\"driver-b1\",\"lat\":19.0596,\"lng\":72.8295,\"timestamp\":{{t1}},\"accuracy\":5.0},\n  {\"driverId\":\"driver-a1\",\"lat\":19.1136,\"lng\":72.8697,\"timestamp\":{{t2}},\"accuracy\":4.0},\n  {\"driverId\":\"driver-c1\",\"lat\":18.9067,\"lng\":72.8147,\"timestamp\":{{t3}},\"accuracy\":6.0}\n]"
+            },
+            "url": {
+              "raw": "{{ingestionUrl}}/v1/locations/batch",
+              "host": ["{{ingestionUrl}}"],
+              "path": ["v1", "locations", "batch"]
+            }
+          }
+        },
+        {
+          "name": "Batch with one invalid element — all-or-nothing",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 — one bad element rejects the batch', () => {",
+                  "    pm.response.to.have.status(400);",
+                  "});",
+                  "// TRADEOFF: all-or-nothing. The alternative is 207 Multi-Status",
+                  "// with a per-item report. All-or-nothing is right HERE because",
+                  "// location data self-heals — a rejected batch is repaired by the",
+                  "// next ping in 4s. For payments, partial success would be",
+                  "// mandatory."
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "[\n  {\"driverId\":\"driver-ok\",\"lat\":19.0596,\"lng\":72.8295,\"timestamp\":1719900000000},\n  {\"driverId\":\"driver-bad\",\"lat\":999.0,\"lng\":72.8295,\"timestamp\":1719900001000}\n]"
+            },
+            "url": {
+              "raw": "{{ingestionUrl}}/v1/locations/batch",
+              "host": ["{{ingestionUrl}}"],
+              "path": ["v1", "locations", "batch"]
+            }
+          }
+        },
+        {
+          "name": "Batch over the size cap (101 items)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Build 101 pings — one over the @Size(max = 100) cap.",
+                  "const pings = [];",
+                  "const now = Date.now();",
+                  "for (let i = 0; i < 101; i++) {",
+                  "    pings.push({",
+                  "        driverId: 'driver-bulk-' + i,",
+                  "        lat: 19.0596,",
+                  "        lng: 72.8295,",
+                  "        timestamp: now + i",
+                  "    });",
+                  "}",
+                  "pm.collectionVariables.set('oversizedBatch', JSON.stringify(pings));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 — size cap enforced', () => {",
+                  "    pm.response.to.have.status(400);",
+                  "});",
+                  "// NEVER trust a client-controlled collection size. Without the",
+                  "// cap, a 1M-element array would blow the heap."
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{{oversizedBatch}}" },
+            "url": {
+              "raw": "{{ingestionUrl}}/v1/locations/batch",
+              "host": ["{{ingestionUrl}}"],
+              "path": ["v1", "locations", "batch"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "05 — H3 spatial (debug endpoints)",
+      "item": [
+        {
+          "name": "Cell lookup — point A (Bandra)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('returns both resolutions', () => {",
+                  "    pm.expect(body).to.have.property('storageCell');",
+                  "    pm.expect(body).to.have.property('partitionCell');",
+                  "});",
+                  "pm.test('partition cell (res 7) has more trailing f padding', () => {",
+                  "    // H3 IDs are fixed-width 64-bit; unused resolution digits are",
+                  "    // filled with 1111 (= f). A COARSER cell therefore has MORE",
+                  "    // trailing f's. The hierarchy is legible right in the hex.",
+                  "    const fCount = s => (s.match(/f+$/) || [''])[0].length;",
+                  "    pm.expect(fCount(body.partitionCell))",
+                  "      .to.be.above(fCount(body.storageCell));",
+                  "});",
+                  "",
+                  "// Save for the comparison in the next request.",
+                  "pm.collectionVariables.set('cellA_storage', body.storageCell);",
+                  "pm.collectionVariables.set('cellA_partition', body.partitionCell);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ingestionUrl}}/v1/debug/spatial/cell?lat=19.0596&lng=72.8295",
+              "host": ["{{ingestionUrl}}"],
+              "path": ["v1", "debug", "spatial", "cell"],
+              "query": [
+                { "key": "lat", "value": "19.0596" },
+                { "key": "lng", "value": "72.8295" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Cell lookup — point B (~400m away) — THE KEY TEST",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "",
+                  "pm.test('DIFFERENT storage cell (res 9 is fine-grained ~174m)', () => {",
+                  "    pm.expect(body.storageCell)",
+                  "      .to.not.eql(pm.collectionVariables.get('cellA_storage'));",
+                  "});",
+                  "",
+                  "pm.test('SAME partition cell (res 7 = one neighbourhood)', () => {",
+                  "    pm.expect(body.partitionCell)",
+                  "      .to.eql(pm.collectionVariables.get('cellA_partition'));",
+                  "});",
+                  "",
+                  "// THIS IS THE WHOLE DESIGN IN ONE ASSERTION:",
+                  "// fine-grained indexing (res 9, for search) + coarse-grained",
+                  "// routing (res 7, for locality). Same partition => same Kafka",
+                  "// partition => same consumer => single writer per region =>",
+                  "// no distributed lock needed."
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ingestionUrl}}/v1/debug/spatial/cell?lat=19.0630&lng=72.8295",
+              "host": ["{{ingestionUrl}}"],
+              "path": ["v1", "debug", "spatial", "cell"],
+              "query": [
+                { "key": "lat", "value": "19.0630" },
+                { "key": "lng", "value": "72.8295" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "k-ring — 2000m radius (expect 7 rings, 169 cells)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "",
+                  "pm.test('7 rings (ceil(2000/300))', () => {",
+                  "    pm.expect(body.rings).to.eql(7);",
+                  "});",
+                  "",
+                  "pm.test('169 cells — the 3k^2+3k+1 formula holds', () => {",
+                  "    const k = body.rings;",
+                  "    pm.expect(body.cellCount).to.eql(3*k*k + 3*k + 1);",
+                  "    pm.expect(body.cellCount).to.eql(169);",
+                  "});",
+                  "",
+                  "// 169 keys = ONE pipelined Redis round trip. This is why res 9:",
+                  "// it minimizes (cells touched x drivers per cell). Res 10 would",
+                  "// need ~1200 cells; res 8 would fetch ~1400 drivers/cell and",
+                  "// discard most."
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ingestionUrl}}/v1/debug/spatial/neighbours?lat=19.0596&lng=72.8295&radiusMetres=2000",
+              "host": ["{{ingestionUrl}}"],
+              "path": ["v1", "debug", "spatial", "neighbours"],
+              "query": [
+                { "key": "lat", "value": "19.0596" },
+                { "key": "lng", "value": "72.8295" },
+                { "key": "radiusMetres", "value": "2000" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "k-ring — 600m radius (expect 2 rings, 19 cells)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('2 rings', () => pm.expect(body.rings).to.eql(2));",
+                  "pm.test('19 cells', () => pm.expect(body.cellCount).to.eql(19));",
+                  "pm.test('origin is included in the disk', () => {",
+                  "    pm.expect(body.cells).to.include(body.origin);",
+                  "});",
+                  "// ringsForRadius deliberately OVER-estimates: too few rings",
+                  "// silently MISSES nearby drivers (a correctness bug); too many",
+                  "// costs a few Redis lookups. Err toward the recoverable mistake."
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ingestionUrl}}/v1/debug/spatial/neighbours?lat=19.0596&lng=72.8295&radiusMetres=600",
+              "host": ["{{ingestionUrl}}"],
+              "path": ["v1", "debug", "spatial", "neighbours"],
+              "query": [
+                { "key": "lat", "value": "19.0596" },
+                { "key": "lng", "value": "72.8295" },
+                { "key": "radiusMetres", "value": "600" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "06 — Dedup (send #1 then #2, same key)",
+      "item": [
+        {
+          "name": "Dedup send #1 — FIRST sighting",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 Accepted', () => pm.response.to.have.status(202));",
+                  "// The FIXED timestamp is deliberate — the dedup key is",
+                  "// driverId + timestamp, so both sends must share it.",
+                  "// This one should be CLAIMED and processed."
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"driverId\": \"driver-dedup\",\n  \"lat\": 28.5494,\n  \"lng\": 77.2001,\n  \"timestamp\": {{dedupTimestamp}},\n  \"speed\": 12.7,\n  \"heading\": 45.0,\n  \"accuracy\": 4.3\n}"
+            },
+            "url": {
+              "raw": "{{ingestionUrl}}/v1/locations",
+              "host": ["{{ingestionUrl}}"],
+              "path": ["v1", "locations"]
+            }
+          }
+        },
+        {
+          "name": "Dedup send #2 — identical, must be SUPPRESSED",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 — producer does NOT dedup (and shouldn\\'t)', () => {",
+                  "    pm.response.to.have.status(202);",
+                  "});",
+                  "",
+                  "// MANUAL VERIFICATION (dedup happens in the CONSUMER):",
+                  "//",
+                  "// 1. kafka-ui -> driver-location-pings: TWO messages for",
+                  "//    driver-dedup. Correct — the producer never dedups.",
+                  "//",
+                  "// 2. Redis holds exactly ONE key:",
+                  "//    docker compose exec redis redis-cli KEYS \"dedup:ping:driver-dedup*\"",
+                  "//    -> dedup:ping:driver-dedup:1719900016000   (ONE key, two sends)",
+                  "//",
+                  "// 3. TTL counting down from 300 = the memory bound working:",
+                  "//    docker compose exec redis redis-cli TTL \"dedup:ping:driver-dedup:1719900016000\"",
+                  "//    (-2 means the key does not exist; -1 means no expiry)",
+                  "//",
+                  "// NOTE: the window is BOUNDED, not absolute. Re-run this pair",
+                  "// more than 300s apart and the second WILL be processed again."
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"driverId\": \"driver-dedup\",\n  \"lat\": 28.5494,\n  \"lng\": 77.2001,\n  \"timestamp\": {{dedupTimestamp}},\n  \"speed\": 12.7,\n  \"heading\": 45.0,\n  \"accuracy\": 4.3\n}"
+            },
+            "url": {
+              "raw": "{{ingestionUrl}}/v1/locations",
+              "host": ["{{ingestionUrl}}"],
+              "path": ["v1", "locations"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

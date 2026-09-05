@@ -40,6 +40,19 @@ spring:
       max-poll-records: 500
 
       properties:
+        # Two settings shape how much data a poll() pulls:
+        # Wait for at least this much data before returning a fetch — fewer,
+        # fatter requests to the broker. Default is 1 byte, meaning "return
+        # immediately with whatever exists," which is latency-optimal and
+        # throughput-poor.
+        fetch.min.bytes: 65536       # 64KB
+
+        # ...but don't wait longer than this for it to accumulate. This is the
+        # LATENCY BOUND on the above — the mirror of the producer's linger.ms.
+        # Under load, 64KB fills in microseconds and this never triggers. When
+        # traffic is sparse, it stops us stalling.
+        fetch.max.wait.ms: 100
+
         # ---- The rebalance-storm guard ----
         # If we don't call poll() again within this window, Kafka declares us
         # dead and reassigns our partitions. The arithmetic that must hold:
@@ -67,15 +80,18 @@ spring:
         # deploy/scale event stops the entire group.
         partition.assignment.strategy: org.apache.kafka.clients.consumer.CooperativeStickyAssignor
 
-      listener:
+    listener:
         # Commit offsets after the listener returns for a batch of records.
         # Since our listener only returns after the write succeeds, this gives us
         # AT-LEAST-ONCE semantics — the choice from Part 1.
-        ack-mode: batch
+      ack-mode: batch
+        # Hand the listener the WHOLE poll() result instead of looping over it.
+        # This is what lets us pipeline the downstream writes.
+      type: batch
 
         # Consumer threads in THIS instance, each taking distinct partitions.
         # 3 instances × concurrency 4 = 12 threads for 12 partitions = one each.
-        concurrency: 4
+      concurrency: 4
   data:
     redis:
       host: localhost
