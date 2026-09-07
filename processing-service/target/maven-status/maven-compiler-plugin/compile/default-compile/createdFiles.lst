@@ -1,5 +1,7 @@
 com\geopulse\processing\service\DeduplicationService.class
+com\geopulse\processing\service\RedisLocationWriter.class
 com\geopulse\processing\config\KafkaErrorHandlingConfig.class
 com\geopulse\processing\exception\NonRetryableException.class
-com\geopulse\processing\kafka\LocationPingConsumer.class
 com\geopulse\processing\ProcessingServiceApplication.class
+com\geopulse\processing\service\RedisLocationWriter$PreviousState.class
+com\geopulse\processing\kafka\LocationPingConsumer.class

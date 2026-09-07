@@ -3,6 +3,7 @@ package com.geopulse.processing.kafka;
 import com.geopulse.common.model.LocationPing;
 import com.geopulse.processing.exception.NonRetryableException;
 import com.geopulse.processing.service.DeduplicationService;
+import com.geopulse.processing.service.RedisLocationWriter;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -30,6 +31,8 @@ import java.util.List;
 public class LocationPingConsumer {
 
     private final DeduplicationService deduplicationService;
+
+    private final RedisLocationWriter redisLocationWriter;   // ← add
 
     @KafkaListener(
             topics = "${geopulse.kafka.topic}",
@@ -78,7 +81,16 @@ public class LocationPingConsumer {
             return;
         }
 
-        // TODO(Phase 3): redisWriter.writeAll(toProcess)     — one pipelined call
+        // TODO(Phase 3): redisWriter.writeAll(toProcess)     — one pipelined call - done ✅
+
+        // Batched: one round trip to read previous state, one to write it all.
+        // An exception here propagates deliberately — it blocks the offset
+        // commit, triggering redelivery (at-least-once), and DefaultErrorHandler
+        // retries transient Redis failures with backoff. Catching it would
+        // silently convert at-least-once into at-most-once.
+        redisLocationWriter.writeAll(toProcess);
+
+
         // TODO(Phase 4): cassandraWriter.writeAll(toProcess) — one batched call
         //
         // Both take the LIST, not a single ping. That signature is the whole
@@ -88,7 +100,7 @@ public class LocationPingConsumer {
         // TEMPORARY: one line per BATCH, not per record. Even so this dies in
         // Phase 3, replaced by a Micrometer counter — logging on the hot path
         // is blocking disk I/O, which is what this architecture exists to avoid.
-        // log.info("Processed batch: received={} written={} partition={}",
-        //          records.size(), toProcess.size(), records.get(0).partition());
+        log.info("Processed batch: received={} written={} partition={}",
+                records.size(), toProcess.size(), records.get(0).partition());
     }
 }

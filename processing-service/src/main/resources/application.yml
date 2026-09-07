@@ -121,3 +121,9 @@ geopulse:
     # deliberate memory-vs-completeness trade.
     # At 250k/s this is ~75M keys ≈ 5-7GB Redis. Tune down if memory is tight.
     ttl-seconds: 300
+  redis:
+    # How long a driver stays "present" without pinging. Pings arrive every 4s,
+    # so 30s tolerates ~7 consecutive misses — enough to survive a tunnel,
+    # short enough that a dead driver disappears fast.
+    # Tunable tradeoff: false-offline vs ghost-driver.
+    presence-ttl-seconds: 30
