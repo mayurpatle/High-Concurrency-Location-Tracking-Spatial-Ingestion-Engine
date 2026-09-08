@@ -94,7 +94,7 @@ public class LocationIngestionService {
         );
 
 
-        // TODO(1.3): publish to Kafka        -> kafkaTemplate.send(TOPIC, key, ping) - done
+        // TODO(1.3): publish to Kafka        -> kafkaTemplate.send(TOPIC, key, ping) - done ✅
 
         locationPingProducer.publish(ping);
 
