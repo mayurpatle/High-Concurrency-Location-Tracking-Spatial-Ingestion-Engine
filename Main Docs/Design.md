@@ -340,12 +340,46 @@ Read throughput    ~50,000–100,000 queries/sec  →  write:read ≈ 3:1 to 5:1
 - **Because:** Logging is a **blocking disk write per record**; counting is an in-memory increment scraped periodically. At 250k/s, per-record logging is a **self-inflicted DoS** — and ⚠️ logging *validation failures* hands an attacker a free way to fill your disks.
 - **Consequence:** the consumer is **silent on success**, so **consumer lag becomes the health signal**. This is precisely why observability isn't optional.
 
+### 5.6 Redis Hot State 
+
+**D-33 · Hash over JSON String for current location**
+
+- **Because**: Redis stores small hashes in a compact listpack encoding, meaningfully more memory-efficient than a serialized JSON string at a million keys. Also avoids a serialization round trip on read.
+- **Note**: the deciding factor is memory, not field-level access — we always write the whole object anyway.
+- **Tradeoff**: ⚠️ Slightly more code than SET/GET of a JSON blob; field names are stored per-key (mitigated by the listpack encoding).
+
+**D-34 · Sorted Set over Set for the cell index 🔥**
+
+- **Because:** ⚠️ A whole-key TTL on cell:{h3} would expire the entire set, evicting drivers who are still actively pinging. Redis Sets have no per-member expiry. A Sorted Set with score = last-seen timestamp gives per-member freshness, and lets reads filter stale members via ZRANGEBYSCORE before any sweep runs.
+⭐ Reads are correct immediately; cleanup is only housekeeping.
+- **Over:** Redis 7.4+ hash-field TTLs (HEXPIRE) — genuinely per-field, but newer and less portable.
+- **Tradeoff:** ⚠️ Requires an explicit sweep (ZREMRANGEBYSCORE), and the opportunistic sweep never reaches cells that go completely silent — memory leaks slowly while reads stay correct. → Phase 5.
+
+**D-35 · TTL as presence — no online flag, no tombstones ⭐**
+
+- **Because:** Key exists → pinged recently → online. Key gone → dark. This eliminates an is_online column, a background job scanning a million rows for stale timestamps, and the race where a crashed driver app stays "online" until the sweeper catches up. One EXPIRE per write rep- laces all of it.
+- **Why 30 s:** pings arrive every 4 s → tolerates ~7 consecutive misses. Enough to survive a tunnel, short enough that a dead driver disappears fast.
+- **Tradeoff: ⚠**️ A direct false-offline vs ghost-driver dial. Too short and a driver in a tunnel vanishes; too long and dead drivers linger in proximity results.
+
+**D-36 · Read-then-write in two pipelines, no Lua script, no lock ⭐⭐**
+
+- **Context:** The move logic is a read-modify-write on shared state (read previous cell → SREM old → ZADD new) — the canonical case for a mutex.
+- **Because:** ⭐ Pings are keyed by H3 res-7 cell → one partition → one consumer thread owns every driver in a region. The interleaving a lock would prevent cannot occur. Also: a pipeline sends all commands then collects all replies, so you cannot branch on a reply mid-pipeline — hence read trip, then write trip.
+- **Over a Lua script:** atomic server-side, correct under any concurrency, but you're writing Lua and per-driver invocation loses batching.
+- **Tradeoff: ⚠**️ Correctness now depends on D-09 holding. Change the partition key and this silently becomes a data race. This dependency should be stated in the code comment — and it is.
+- **⭐ Interview line:** "We didn't need a Lua script or a distributed lock because the partitioning guarantees a single writer per region."
+
+**D-37 · Stale-write guard: last-write-wins on device timestamp**
+
+- **Because:** The D-09 boundary race means an older ping can arrive after a newer one. Without the guard, a driver's map marker jumps backwards — ⚠️ maddening to reproduce, since it only fires when someone crosses a partition boundary at the wrong moment.
+>= not >: an equal timestamp is a duplicate that slipped past the dedup window; rewriting it is harmless but pointless.
+Tradeoff: ⚠️ Trusts the
 ---
 
 ## 6. Data model
 
 ### `LocationPing` (Kafka message / domain model)
-```java
+```
 record LocationPing(
     String driverId,
     double lat, double lng,     // primitives — validation guarantees presence
@@ -405,6 +439,13 @@ record LocationPing(
 | Consumer down > 6 h | Backlog **expires** | ⚠️ **Manual — data lost** | ⚠️ Yes |
 | Driver crosses cell boundary | Pings on different partitions, **no ordering** | Last-write-wins on timestamp | No — brief backwards jump |
 | Hot cell (stadium) | One partition overloaded, lag grows | ⚠️ **Not yet handled — Phase 5.2** | No, but freshness degrades |
+| Driver stops pinging | Hash TTL expires → treated as offline | Auto on next ping | No — by design |
+| Driver moves between cells   | SREM old + ZADD new in one pipeline  |Auto   |  No              |
+| Cell goes completely silent    |⚠️ Stale members never swept  |⚠️ Not handled — Phase 5 |No — reads filter by score; memory leaks|
+|Out-of-order ping (boundary race)|Skipped by the stale-write guard | Auto  |⚠️ Yes, that ping — correct behaviour  |
+| Device clock skew| Valid updates may be suppressed by last-write-wins  |⚠️ Not handled | ⚠️ Possible — chaos C-08 |
+
+
 
 ---
 
@@ -425,6 +466,7 @@ record LocationPing(
 | **~5,000 records/sec/consumer** | ⚠️ **ESTIMATE**, derived from the above — and the basis of the 64-partition figure |
 | `dedup TTL = 300s` | **Chosen** — covers realistic redelivery paths with margin |
 | `max-accuracy-metres = 100` | **Guess** — externalized because the right value is discovered in production |
+|presence-ttl-seconds = 30 |  Derived from the 4 s ping cadence (~7 tolerated misses) |
 
 ### The poll-deadline arithmetic
 ```
