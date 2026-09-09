@@ -94,4 +94,21 @@ public class H3IndexService {
         final double approxCellWidthMetres = 300.0;   // res 9 ≈ 300 m across
         return (int) Math.ceil(radiusMetres / approxCellWidthMetres);
     }
+
+    /**
+     * Great-circle distance in metres between two points.
+     *
+     * Needed because k-rings OVER-INCLUDE: a hexagon disk covering a 2km radius
+     * isn't a circle — corners of edge cells stick out. Cells are the COARSE
+     * filter (cheap candidate lookup); true distance is the FINE filter.
+     *
+     * Using H3's implementation rather than hand-rolling haversine: it's
+     * already on the classpath, tested, and handles the edge cases.
+     */
+    public double distanceMetres(double lat1, double lng1, double lat2, double lng2) {
+        return h3.greatCircleDistance(
+                new com.uber.h3core.util.LatLng(lat1, lng1),
+                new com.uber.h3core.util.LatLng(lat2, lng2),
+                com.uber.h3core.LengthUnit.m);
+    }
 }

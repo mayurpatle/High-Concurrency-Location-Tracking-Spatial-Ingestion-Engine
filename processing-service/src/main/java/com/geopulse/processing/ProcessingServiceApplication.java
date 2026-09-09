@@ -3,7 +3,7 @@ package com.geopulse.processing;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
-@SpringBootApplication
+@SpringBootApplication(scanBasePackages = "com.geopulse")
 public class ProcessingServiceApplication {
     public static void main(String[] args) {
         SpringApplication.run(ProcessingServiceApplication.class, args);

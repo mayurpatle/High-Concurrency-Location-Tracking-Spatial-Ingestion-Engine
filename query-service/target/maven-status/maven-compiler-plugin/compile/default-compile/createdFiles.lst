@@ -1,1 +1,3 @@
 com\geopulse\query\QueryServiceApplication.class
+com\geopulse\query\controller\DriverQueryController.class
+com\geopulse\query\service\NearbyDriverService.class

@@ -23,3 +23,10 @@ management:
   endpoint:
     health:
       show-details: always
+
+geopulse:
+  redis:
+    # MUST match processing-service. If the reader's floor is longer than the
+    # writer's TTL, you'd return drivers whose position hash has already
+    # expired — the index says they're there, the position is gone.
+    presence-ttl-seconds: 30
