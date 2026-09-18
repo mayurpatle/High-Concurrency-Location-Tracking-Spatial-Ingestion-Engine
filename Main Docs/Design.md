@@ -374,6 +374,43 @@ Read throughput    ~50,000–100,000 queries/sec  →  write:read ≈ 3:1 to 5:1
 - **Because:** The D-09 boundary race means an older ping can arrive after a newer one. Without the guard, a driver's map marker jumps backwards — ⚠️ maddening to reproduce, since it only fires when someone crosses a partition boundary at the wrong moment.
 >= not >: an equal timestamp is a duplicate that slipped past the dedup window; rewriting it is harmless but pointless.
 Tradeoff: ⚠️ Trusts the
+
+**D-38 · H3 cell sets over Redis GEOSEARCH**
+
+- The alternative: GEOADD + GEOSEARCH is two commands. No k-rings, no cell bookkeeping, no move logic. Returns drivers sorted by true distance. Genuinely less code.
+- What GEO actually is: a Sorted Set whose score is a geohash (52-bit lat/lng interleaving). GEOSEARCH computes covering geohash ranges, range-scans, then filters by distance.
+- 🔥 Because: it's one Sorted Set — singular. Every driver in the coverage area lives in one key, and a Redis key lives on one node. In Redis Cluster a single key is atomic and indivisible, so ⚠️ it cannot shard: one machine's read throughput, forever, and adding nodes does nothing. Our cell:{h3} keys distribute across hash slots naturally — different neighbourhoods hit different nodes.
+- ⭐ Same principle as D-05: a range can't be sharded, a discrete key can. Different layer, identical reasoning.
+- Three supporting reasons: (1) we already carry cell IDs for Kafka and Cassandra keys — GEOADD would be a second spatial index to keep consistent; (2) ⭐ the cell is a unit of aggregation, so density is ZCOUNT at O(log n) whereas GEO needs a radius-search-and-count; (3) cell membership is stable and cacheable, while "within 2 km of an arbitrary point" is unique per query.
+- Tradeoff: ⚠️ GEO is simpler and more accurate. It computes true haversine natively; we over-include and must filter in Java (D-39). All of D-33–D-37's complexity — move logic, SREM/ZADD, ghost drivers — disappears with GEO. ⭐ For a single-node deployment, GEO is probably the better choice — its one weakness never bites if you never shard.
+- 💡 The hybrid worth naming: H3 sets for sharding and aggregation plus a per-cell GEO index for precise intra-cell distance. Over-engineering here, but knowing it exists is a good signal.
+
+**D-39 · True-distance filter after the k-ring lookup**
+
+- Because: ⭐ k-rings over-include — a hexagon disk covering a 2 km radius is not a circle; corners of edge cells stick out. Without the filter you'd return drivers 2.4 km away for a 2 km query.
+- ⭐ Cells are the COARSE filter (cheap candidate lookup); true distance is the FINE filter.
+- Tradeoff: ⚠️ Work moves from Redis into our JVM — we fetch candidates we then discard. Bounded by the radius, so acceptable; it's the direct cost of D-38.
+
+**D-40 · ZRANGEBYSCORE with a freshness floor, not ZRANGE**
+
+- Because: stale members are filtered at read time, so a driver who stopped pinging never appears — even though the opportunistic sweep hasn't removed them. ⭐ Reads are correct immediately; cleanup is only housekeeping.
+- Tradeoff: ⚠️ The reader's floor must match the writer's presence TTL. If the floor is longer, you return drivers whose position hash has already expired — the index says they're there, the position is gone.
+
+**D-41 · Sort by distance in Java, not Redis**
+
+- Because: Redis can sort by score, but our score is a timestamp, not a distance — and there's no way to sort by distance-from-an-arbitrary-point without a GEO index. The candidate set is bounded by the radius, so the sort is cheap.
+
+**D-42 · Hard ceiling on client-controlled radius (@Max(10000)) ⭐**
+
+- Because: a 50 km request means k = ceil(50000/300) = 167 rings → 3(167²)+3(167)+1 ≈ **84,000 cells in one pipeline**. That's a client-controlled amount of work — the same vulnerability class as the uncapped batch size (D-21).
+- ⭐ Any parameter that scales your workload needs a ceiling.
+
+**D-43 · Query service has no Kafka dependency**
+
+- Because: reads are bursty and user-driven; writes are a relentless metronome. They scale independently, so they're separate deployments. The absence is the module boundary (D-04) made visible — even in the health endpoint, which shows Redis but no Kafka component.
+
+
+
 ---
 
 ## 6. Data model
@@ -413,13 +450,25 @@ record LocationPing(
 |---|---|---|---|
 | `POST` | `/v1/locations` | `202` / `400` | → Kafka |
 | `POST` | `/v1/locations/batch` | `202` / `400` | → Kafka (max 100) |
-| `GET` | `/v1/drivers/{id}/location` *(P3)* | `200` / **`404` = offline** | Redis |
-| `GET` | `/v1/drivers/nearby` *(P3)* | `200` | Redis |
-| `GET` | `/v1/cells/{h3}/count` *(P3)* | `200` | Redis |
+| `GET` | `/v1/drivers/{id}/location` | `200` / **`404` = offline** | Redis |
+| `GET` | `/v1/drivers/nearby?lat=&lng=&radiusMetres=&limit=` | `200` / `400` | Redis · radius ≤ 10 km, limit ≤ 500 |
+| `GET` | `/v1/cells/{h3}/count` | `200` | Redis · ZCOUNT, O(log n) |
+| `GET` | `/v1/cells/count?lat=&lng=` | `200` | Redis · resolves the cell for you |
 | `GET` | `/v1/drivers/{id}/trajectory` *(P4)* | `200` | Cassandra |
 | `GET` | `/v1/cells/{h3}/occupancy` *(P4)* | `200` | Cassandra |
-
 > 🔹 **Presence for free:** the `404` isn't a special case — we store **no "offline" flag.** TTL expiry *is* the offline signal.
+
+**The Query Algorithm :** 
+
+1. originCell = h3(lat, lng, res 9)
+2. k          = ceil(R / ~300m)
+3. cells      = gridDisk(originCell, k)              → 3k²+3k+1 cells
+4. pipeline:  ZRANGEBYSCORE cell:{c} (now-30s) +inf  → candidates   ◄ trip 1
+5. union driver IDs
+6. pipeline:  HMGET driver:{id}:loc lat lng ts heading → positions  ◄ trip 2
+7. filter by TRUE haversine distance ≤ R
+8. sort by distance, cap at limit
+
 
 ---
 
@@ -443,7 +492,11 @@ record LocationPing(
 | Driver moves between cells   | SREM old + ZADD new in one pipeline  |Auto   |  No              |
 | Cell goes completely silent    |⚠️ Stale members never swept  |⚠️ Not handled — Phase 5 |No — reads filter by score; memory leaks|
 |Out-of-order ping (boundary race)|Skipped by the stale-write guard | Auto  |⚠️ Yes, that ping — correct behaviour  |
-| Device clock skew| Valid updates may be suppressed by last-write-wins  |⚠️ Not handled | ⚠️ Possible — chaos C-08 |
+| Device clock skew| Valid updates may be suppressed by last-write-wins |⚠️ Not handled | ⚠️ Possible — chaos C-08 |
+| Driver hash expires between the two query round trips|Candidate skipped   | Auto | 	No — two non-atomic reads of expiring data, correctly handled |
+|Query radius over the cap |400 before any Redis work   |— | No — guard, not a failure |
+| Reader freshness floor > writer TTL  |  ⚠️ Returns indexed drivers whose position is gone | Config must match  | No, but empty/partial results                         |
+|                  |                                                    |               |                          |
 
 
 
@@ -467,6 +520,7 @@ record LocationPing(
 | `dedup TTL = 300s` | **Chosen** — covers realistic redelivery paths with margin |
 | `max-accuracy-metres = 100` | **Guess** — externalized because the right value is discovered in production |
 |presence-ttl-seconds = 30 |  Derived from the 4 s ping cadence (~7 tolerated misses) |
+|radiusMetres max = 10000, limit max = 500 |Chosen — DoS ceilings, sized so worst-case k-ring stays ~1,100 cells|
 
 ### The poll-deadline arithmetic
 ```
@@ -479,17 +533,19 @@ degraded  500 × 800ms = 400s    vs 300s   ❌ EVICTED → rebalance storm
 > **Two timeouts, two questions:** heartbeat/session (background thread) = ***is the process alive?*** · poll interval = ***is it making progress?*** A consumer stuck in a slow write is **alive and heartbeating while making zero progress** — hence both checks.
 
 ### Version notes & traps
-| Item | Note |
-|---|---|
-| **H3 v4** | 🔥 Renamed everything. `geoToH3`→`latLngToCellAddress`, `h3ToParent`→`cellToParentAddress`, `kRing`→`gridDisk`. Most tutorials online are v3 and won't compile. |
-| **Kafka 4.x** | ZooKeeper **removed entirely** — KRaft is the only mode. |
-| **Single-broker dev** | Must override internal-topic RF to 1, or the first consumer group start fails. |
-| **Advertised listeners** | 🔥 Must be reachable *from where the client runs* → **two listeners** (containers use `kafka:29092`, host apps use `localhost:9092`). |
-| **`host.docker.internal`** | The same trap reversed — a container reaching a host service. ⭐ *"localhost" is always relative to who's asking.* |
+| Item                             | Note |
+|----------------------------------|---|
+| **H3 v4**                        | 🔥 Renamed everything. `geoToH3`→`latLngToCellAddress`, `h3ToParent`→`cellToParentAddress`, `kRing`→`gridDisk`. Most tutorials online are v3 and won't compile. |
+| **Kafka 4.x**                    | ZooKeeper **removed entirely** — KRaft is the only mode. |
+| **Single-broker dev**            | Must override internal-topic RF to 1, or the first consumer group start fails. |
+| **Advertised listeners**         | 🔥 Must be reachable *from where the client runs* → **two listeners** (containers use `kafka:29092`, host apps use `localhost:9092`). |
+| **`host.docker.internal`**       | The same trap reversed — a container reaching a host service. ⭐ *"localhost" is always relative to who's asking.* |
 | **Cassandra `local-datacenter`** | Must match `CASSANDRA_DC` exactly, or "No node was available" at startup. |
-| **DLT topic suffix** | ⚠️ Differs by Spring Kafka version (`.DLT` vs `-dlt`) — **pin it explicitly.** |
-| **`auto-offset-reset`** | ⚠️ Applies **only when there is no committed offset**. It is *not* "where to resume after restart." |
-| **PowerShell** | Mangles `-D` args. Quote the whole argument, or use `$env:VAR`. |
+| **DLT topic suffix**             | ⚠️ Differs by Spring Kafka version (`.DLT` vs `-dlt`) — **pin it explicitly.** |
+| **`auto-offset-reset`**          | ⚠️ Applies **only when there is no committed offset**. It is *not* "where to resume after restart." |
+| **PowerShell**                   | Mangles `-D` args. Quote the whole argument, or use `$env:VAR`. |
+| **RedisCallback serialization**  |🔥 Asymmetric: you SEND raw bytes but RECEIVE deserialized objects. The callback gives you the low-level connection for writing; the template still owns reading, and StringRedisTemplate's serializer has already converted results. (byte[]) casts on results throw ClassCastException. For bytes both ways: RedisTemplate<byte[], byte[]> with RedisSerializer.byteArray().  |
+|                                  ||
 
 ---
 
@@ -589,3 +645,5 @@ The soundbites worth having ready:
 10. **The poison pill:** *"One malformed message can take a region offline indefinitely while the consumer looks perfectly healthy. That's why per-partition lag is the metric that matters."*
 11. **Capacity honesty:** *"I estimated ~5 ms per record from typical Redis and Cassandra latencies, then measured it under load. If the measured p99 differs, the partition math changes and I revisit it."*
 12. **Non-technical version:** *"I'm building the part of Uber that quietly watches millions of moving cars at once and always knows who's where."*
+13. **Why not GEOSEARCH:** *"GEOSEARCH is simpler and more accurate, and I'd use it for a single-node system. We use H3 cell sets because a GEO index lives in one key and therefore one node — it can't shard. Our cell keys distribute naturally across a cluster. We're also already carrying H3 cells for Kafka partitioning and Cassandra keys, so cells double as a unit of aggregation for downstream services, not just a search index."*
+14. **The over-inclusion filter:** *"k-rings return cells that overlap the radius, and a hexagon disk isn't a circle — so the cells are a coarse filter to find candidates cheaply, and true haversine distance is the fine filter. Skip that step and a 2 km query returns drivers 2.4 km away."*

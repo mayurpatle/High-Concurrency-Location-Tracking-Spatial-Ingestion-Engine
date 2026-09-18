@@ -37,9 +37,9 @@ Legend: ✅ done · 🔜 next · ⬜ planned
 - ✅ **2.3 · [Batch Consumption & Throughput](phase-2-session-3-batch-consumption-and-throughput.md)** — round-trip economics, batch listeners, per-record failure isolation, concurrency, backpressure  🏁 *Phase 2 complete*
 
 ### Phase 3 — Hot state (Redis)
-- 🔜 3.1 · Current-location model, TTL/ephemerality, the write path
-- ⬜ 3.2 · Spatial queries — Redis GEO vs H3-cell sets, k-ring neighbor search
-- ⬜ 3.3 · The "drivers near me" query API
+- ✅ **3.1 · [Redis Hot State](phase-3-session-1-redis-hot-state.md)** — Hash vs String, Sorted Set for per-member expiry, TTL-as-presence, the move problem, batched lock-free write path
+- ✅ **3.2 · [Spatial Queries](phase-3-session-2-spatial-queries.md)** — H3 cell sets vs Redis `GEOSEARCH`, the k-ring algorithm, over-inclusion filter, read API  🏁 *the system now answers questions*
+- ✅ 3.3 · Hardening the read path — caching, degradation, pagination
 
 ### Phase 4 — Persistent history (Cassandra)
 - ⬜ 4.1 · Query-driven data modeling, partition & clustering key design

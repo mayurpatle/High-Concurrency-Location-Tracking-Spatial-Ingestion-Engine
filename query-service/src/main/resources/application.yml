@@ -8,6 +8,19 @@ spring:
     redis:
       host: localhost
       port: 6379
+      # THE most important setting in this file.
+      # Without a timeout, a hung Redis blocks a request thread FOREVER.
+      # Enough of those and the whole service is unresponsive — including
+      # endpoints that never touch Redis.
+      # 200ms is generous: our p99 SLO for the whole query is 100ms, so any
+      # single Redis call taking 200ms means something is already wrong.
+      timeout: 200ms
+      connect-timeout: 500ms
+      lettuce:
+        pool:
+          # Bounded pool: caps how many threads can be waiting on Redis at once.
+          max-active: 16
+          max-wait: 100ms   # fail fast rather than queue indefinitely
   cassandra:
     contact-points: localhost
     port: 9042
@@ -23,6 +36,27 @@ management:
   endpoint:
     health:
       show-details: always
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      redis:
+        # Sample the last 20 calls; trip if >50% failed.
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 20
+        failure-rate-threshold: 50
+
+        # Don't trip on a tiny sample — 10 calls minimum, or one unlucky
+        # failure at startup opens the breaker.
+        minimum-number-of-calls: 10
+
+        # Once open, reject instantly for 10s. This protects REDIS as much as
+        # us: without it, our retries become a DDoS on a recovering dependency.
+        wait-duration-in-open-state: 10s
+
+        # Then allow 3 trial calls. If they succeed, close; if not, reopen.
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
 
 geopulse:
   redis:

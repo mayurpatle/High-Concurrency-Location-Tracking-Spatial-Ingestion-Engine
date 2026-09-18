@@ -1,7 +1,9 @@
 package com.geopulse.query.controller;
 
 import com.geopulse.common.dto.NearbyDriver;
+import com.geopulse.common.dto.NearbyResponse;
 import com.geopulse.common.spatial.H3IndexService;
+import com.geopulse.query.exception.SpatialUnavailableException;
 import com.geopulse.query.service.NearbyDriverService;
 import jakarta.validation.constraints.*;
 import lombok.RequiredArgsConstructor;
@@ -37,7 +39,7 @@ public class DriverQueryController {
      * Project 2's matching engine will consume.
      */
     @GetMapping("/drivers/nearby")
-    public List<NearbyDriver> nearby(
+    public NearbyResponse nearby(
             @RequestParam @DecimalMin("-90.0")  @DecimalMax("90.0")  double lat,
             @RequestParam @DecimalMin("-180.0") @DecimalMax("180.0") double lng,
 
@@ -62,6 +64,16 @@ public class DriverQueryController {
     public ResponseEntity<Map<String, Object>> currentLocation(@PathVariable String driverId) {
 
         Map<Object, Object> hash = redis.opsForHash().entries("driver:" + driverId + ":loc");
+
+        try {
+            hash = redis.opsForHash().entries("driver:" + driverId + ":loc");
+        } catch (Exception e) {
+            // CRITICAL distinction: we failed to look, so we must NOT say 404.
+            // A 404 means "this driver is definitely offline" — a matching
+            // engine would exclude them. During a Redis outage that's a lie
+            // about every driver in the fleet.
+            throw new SpatialUnavailableException("location lookup failed", e);
+        }
 
         if (hash.isEmpty()) {
             return ResponseEntity.notFound().build();   // never pinged, or gone dark

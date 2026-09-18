@@ -1,9 +1,14 @@
 package com.geopulse.query.service;
 
 import com.geopulse.common.dto.NearbyDriver;
+import com.geopulse.common.dto.NearbyResponse;
 import com.geopulse.common.spatial.H3IndexService;
+import com.geopulse.query.config.CacheConfig;
+import com.geopulse.query.exception.SpatialUnavailableException;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
@@ -34,7 +39,12 @@ public class NearbyDriverService {
     @Value("${geopulse.redis.presence-ttl-seconds:30}")
     private long presenceTtlSeconds;
 
-    public List<NearbyDriver> findNearby(double lat, double lng, double radiusMetres, int limit) {
+    /**
+     * fallbackMethod runs when the call fails OR the breaker is open.
+     * Its signature must match, plus a trailing Throwable.
+     */
+    @CircuitBreaker(name = "redis", fallbackMethod = "findNearbyFallback")
+    public NearbyResponse findNearby(double lat, double lng, double radiusMetres, int limit) {
 
         // ---- 1. Expand the search area into cells ----
         String originCell = h3IndexService.toStorageCell(lat, lng);
@@ -72,7 +82,11 @@ public class NearbyDriverService {
         }
 
         if (candidateIds.isEmpty()) {
-            return List.of();
+            // A genuine empty result — we searched and found nothing. Still
+            // return the metadata so the caller can tell this apart from a
+            // truncated result, and knows what radius was actually searched.
+            return new NearbyResponse(List.of(), 0, false,
+                    radiusMetres, cells.size(), originCell);
         }
 
         // ---- 3. Fetch each candidate's position, in ONE trip ----
@@ -115,11 +129,38 @@ public class NearbyDriverService {
             nearby.add(new NearbyDriver(ids.get(i), dLat, dLng, distance, ts, heading));
         }
 
+        nearby.sort(Comparator.comparingDouble(NearbyDriver::distanceMetres));
+
+        // Capture the true count BEFORE truncating — that's the whole point
+        // of the metadata. After subList() the information is gone.
+        int totalFound = nearby.size();
+        boolean truncated = totalFound > limit;
+        List<NearbyDriver> page = truncated ? nearby.subList(0, limit) : nearby;
+
+        return new NearbyResponse(page, totalFound, truncated,
+                radiusMetres, cells.size(), originCell);
+
         // ---- 5. Nearest first, capped ----
         // Sorting in Java, not Redis: we're sorting by a distance Redis doesn't
         // know about (it stores timestamps as scores, not distances).
-        nearby.sort(Comparator.comparingDouble(NearbyDriver::distanceMetres));
-        return nearby.size() > limit ? nearby.subList(0, limit) : nearby;
+        //nearby.sort(Comparator.comparingDouble(NearbyDriver::distanceMetres));
+        //return nearby.size() > limit ? nearby.subList(0, limit) : nearby;
+    }
+
+    /**
+     * We return EMPTY, but the controller turns that into a 503 — see below.
+     *
+     * Why not just return empty with a 200: "no drivers nearby" is a VALID
+     * negative answer that a matching engine would act on (and Project 3 would
+     * read as zero supply, potentially triggering surge). We didn't discover
+     * there are no drivers — we FAILED TO LOOK. Never return a value that
+     * looks like a valid answer when you actually failed to answer.
+     */
+    @SuppressWarnings("unused")   // invoked reflectively by Resilience4j
+    private NearbyResponse findNearbyFallback(double lat, double lng,
+                                                  double radiusMetres, int limit,
+                                                  Throwable t) {
+        throw new SpatialUnavailableException("nearby search unavailable", t);
     }
 
     /**
@@ -130,10 +171,30 @@ public class NearbyDriverService {
      * search and count the results. The CELL is a unit of aggregation, not
      * just a search index — that's a big part of why we chose H3 sets.
      */
+    /**
+     * Driver count in a single cell — the supply-density signal.
+     *
+     * Cached (see CacheConfig): many callers ask the same question repeatedly,
+     * and a few seconds of staleness is acceptable for a density figure.
+     * Contrast with findNearby(), which is deliberately NOT cached.
+     */
+
+    @CircuitBreaker(name = "redis", fallbackMethod = "countInCellFallback")
+    @Cacheable(CacheConfig.CELL_COUNT_CACHE)
     public long countInCell(String h3Cell) {
         long freshnessFloor = System.currentTimeMillis() - (presenceTtlSeconds * 1000);
         Long count = redis.opsForZSet().count(
                 CELL_KEY_PREFIX + h3Cell, freshnessFloor, Double.POSITIVE_INFINITY);
         return count == null ? 0L : count;
+    }
+    /**
+     * Density tolerates staleness, so a wrong-but-plausible number is safe
+     * here in a way it isn't for driver locations. Returning -1 signals
+     * "unknown" without pretending the cell is empty — a 0 would read as
+     * "no supply", which is exactly the wrong signal for surge pricing.
+     */
+    @SuppressWarnings("unused")
+    private long countInCellFallback(String h3Cell, Throwable t) {
+        return -1L;
     }
 }
