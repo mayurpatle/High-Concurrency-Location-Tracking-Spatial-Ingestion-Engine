@@ -26,7 +26,7 @@ services:
 
       # ---- Single-broker overrides (see "the RF footgun" note) ----
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1   # in prod   the rep factor  would  be  3
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1 # in prod  the  log  replication factor  will be  three
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1 # in prod  the  log  replication factor  will be  3
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1  # in prod the  isr  will be   2
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0    # dev: don't wait before rebalancing
 

@@ -63,7 +63,7 @@ public class DriverQueryController {
     @GetMapping("/drivers/{driverId}/location")
     public ResponseEntity<Map<String, Object>> currentLocation(@PathVariable String driverId) {
 
-        Map<Object, Object> hash = redis.opsForHash().entries("driver:" + driverId + ":loc");
+        Map<Object, Object> hash ;
 
         try {
             hash = redis.opsForHash().entries("driver:" + driverId + ":loc");

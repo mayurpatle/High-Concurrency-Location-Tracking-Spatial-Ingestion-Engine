@@ -54,11 +54,13 @@ public class LocationPingConsumer {
             // record to the DLT — so one poison pill doesn't cost us the other
             // 499. Without this, the whole batch would be redelivered.
             if (ping == null) {
+                redisLocationWriter.writeAll(toProcess);
                 throw new BatchListenerFailedException(
                         "Undeserializable record at offset " + record.offset(),
                         new NonRetryableException("null payload"), i);
             }
             if (ping.driverId() == null || ping.h3Cell() == null) {
+                redisLocationWriter.writeAll(toProcess);
                 throw new BatchListenerFailedException(
                         "Missing required field at offset " + record.offset(),
                         new NonRetryableException("missing field"), i);
@@ -91,11 +93,10 @@ public class LocationPingConsumer {
         redisLocationWriter.writeAll(toProcess);
 
 
-        // TODO(Phase 4): cassandraWriter.writeAll(toProcess) — one batched call
-        //
-        // Both take the LIST, not a single ping. That signature is the whole
-        // point of this session: the write layer must be batch-shaped, or the
-        // round-trip savings never materialize.
+        // TODO(Phase 4): cassandraWriter.writeAll(toProcess) — one batched call  - done ✅
+        // History is deliberately NOT written here. It runs in its own consumer
+        // group (LocationHistoryConsumer) so Cassandra's latency and outages can
+        // never touch hot-path freshness. See Session 4.2, Part 1.
 
         // TEMPORARY: one line per BATCH, not per record. Even so this dies in
         // Phase 3, replaced by a Micrometer counter — logging on the hot path

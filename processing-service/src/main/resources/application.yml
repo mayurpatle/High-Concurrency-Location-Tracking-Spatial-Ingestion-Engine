@@ -97,6 +97,21 @@ spring:
       host: localhost
       port: 6379
   cassandra:
+    keyspace-name: geopulse   # the writer's prepared statements use unqualified table names
+    request:
+      # Written out for visibility (it's the driver default): bounds how long
+      # one write can take, which bounds each retry attempt's processing time.
+      timeout: 2s
+      throttler:
+        # The concurrency bound promised in Part 2. 500 pings × 2 tables =
+        # 1,000 async writes per batch, per listener thread — enough to exceed
+        # the driver's per-connection limit. At most 512 in flight; the rest
+        # queue client-side. Past 10,000 queued, requests fail fast with
+        # RequestThrottlingException — registered as TRANSIENT below.
+        # Bounded concurrency is backpressure.
+        type: concurrency-limiting
+        max-concurrent-requests: 512
+        max-queue-size: 10000
     contact-points: localhost
     port: 9042
     local-datacenter: datacenter1   # MUST match CASSANDRA_DC from Part 3, or startup fails
@@ -114,6 +129,8 @@ management:
 geopulse:
   kafka:
     topic: driver-location-pings
+    history-group-id: geopulse-history-writer
+    history-dlt: driver-location-pings-history-dlt
   dedup:
     # How long a dedup key survives. Sized to cover realistic redelivery paths
     # (rebalance reprocessing = seconds; producer retries = ms) with margin.

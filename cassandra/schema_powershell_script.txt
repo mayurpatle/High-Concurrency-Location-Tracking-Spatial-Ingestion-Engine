@@ -1,0 +1,20 @@
+docker compose exec -T cassandra cqlsh -e @"
+CREATE KEYSPACE IF NOT EXISTS geopulse WITH replication = {'class':'NetworkTopologyStrategy','datacenter1':1};
+
+CREATE TABLE IF NOT EXISTS geopulse.driver_trajectory (
+    driver_id text, day date, ts timestamp,
+    lat double, lng double, h3_cell text,
+    speed double, heading double, accuracy double,
+    PRIMARY KEY ((driver_id, day), ts)
+) WITH CLUSTERING ORDER BY (ts DESC)
+  AND compaction = {'class':'TimeWindowCompactionStrategy','compaction_window_unit':'DAYS','compaction_window_size':1}
+  AND default_time_to_live = 2592000;
+
+CREATE TABLE IF NOT EXISTS geopulse.cell_occupancy (
+    h3_cell text, hour_bucket timestamp, ts timestamp,
+    driver_id text, lat double, lng double,
+    PRIMARY KEY ((h3_cell, hour_bucket), ts, driver_id)
+) WITH CLUSTERING ORDER BY (ts DESC)
+  AND compaction = {'class':'TimeWindowCompactionStrategy','compaction_window_unit':'HOURS','compaction_window_size':6}
+  AND default_time_to_live = 604800;
+"@

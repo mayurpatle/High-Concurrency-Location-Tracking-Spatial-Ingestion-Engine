@@ -409,6 +409,122 @@ Tradeoff: ⚠️ Trusts the
 
 - Because: reads are bursty and user-driven; writes are a relentless metronome. They scale independently, so they're separate deployments. The absence is the module boundary (D-04) made visible — even in the health endpoint, which shows Redis but no Kafka component.
 
+**D-44 · Cache only cellCount — not nearby, not location ⭐**
+
+- The rule: ⭐ cache what is expensive-or-repeated AND tolerates staleness — not "cache reads."
+- Not nearby/location: already two round trips to an in-memory store (~2–5 ms). A cache saves milliseconds and costs staleness on data whose entire value is freshness, on top of the 2 s pipeline lag we already carry.
+- Yes cellCount: many callers ask the same question repeatedly (Project 3's pricing engine polls hundreds of cells) and the answer tolerates staleness — a 5-second-old supply count is fine for "is this area busy?"
+- Tradeoff: ⚠️ Per-instance cache. Three query pods = three independent caches, so a client can see different counts depending on routing. Fine for a density figure. Cluster-wide consistency would mean caching in Redis — but that's caching Redis in Redis, which only pays when the backing computation is expensive, not a single ZCOUNT.
+
+**D-45 · Short TTL over stale-while-revalidate (the thundering-herd call)**
+
+- The herd: a popular entry expires and ⚠️ 500 concurrent requests all miss at the same instant. ⭐ The cache didn't reduce load — it SYNCHRONIZED it into a spike.
+- Three known mitigations: single-flight locking · probabilistic early expiry ("XFetch") · stale-while-revalidate.
+- Chose: plain expireAfterWrite(5s). Caffeine's refreshAfterWrite requires a CacheLoader, which CaffeineCacheManager doesn't supply for @Cacheable methods — wiring one needs an ObjectProvider to dodge the circular dependency (the cached service depends on the cache manager).
+- Because: ⭐ stale-while-revalidate earns its complexity when the backing call is expensive — a Cassandra aggregation, an external API. Here it's a single ZCOUNT against memory. Paying that machinery to shield Redis from a burst of O(log n) lookups is optimizing the wrong thing.
+- Tradeoff: ⚠️ We keep the herd exposure. At our scale the herd stampedes a ZCOUNT, which Redis absorbs trivially — an accepted risk, not an unnoticed one.
+- 🔹 maximumSize(10_000): ⭐ an unbounded cache is a memory leak with good PR.
+
+**D-46 · Redis timeouts on the read path ⭐**
+
+- Because: ⭐ a slow dependency is more dangerous than a dead one. If Redis hangs, query threads block; enough of them and the whole service is unresponsive — including endpoints that never touch Redis, like /actuator/health. A dead dependency fails fast and you handle it; a slow one holds your resources hostage while looking alive.
+- Values: timeout: 200ms, connect-timeout: 500ms, pool max-active: 16, max-wait: 100ms. 200 ms is generous — our p99 for the whole query is 100 ms, so a single call taking 200 ms already means something is wrong.
+- ⭐ Never make an unbounded network call.
+
+**D-47 · Circuit breaker on Redis reads**
+
+- Because: after repeated failures, stop calling entirely and fail instantly. ⭐ It protects the dependency as much as us — without it, our retries become a self-inflicted DDoS on a recovering Redis.
+- Config: 20-call window, 50% failure threshold, minimum 10 calls (don't trip on a tiny sample), 10 s open, 3 half-open trials.
+- Tradeoff: ⚠️ With @CircuitBreaker outside @Cacheable, cache hits register as successes in the breaker's window, slightly diluting the failure rate. Acceptable at this scale; worth knowing it's there.
+
+**D-48 · Fail loudly: 503, never a valid-looking negative ⭐⭐**
+
+- Because: the fallback is a product decision, not a technical one, and it differs per endpoint:
+
+- | `GET` |    `/drivers/nearby` | `503` |  An empty list is a lie a matching engine acts on — and Project 3 reads it as zero supply, potentially triggering surge |
+- | `GET`|  `/drivers/{id}/location` | `503, not 404` | 404 means "definitely offline." ⚠️ We don't know that — we failed to look. During an outage that's a lie about every driver in the fleet |
+- | `GET` |  `/cells/{h3}/count` | -1, not 0 | 0 reads as "no supply" — exactly the wrong signal. -1 means unknown |
+- ⭐⭐ Never return a value that looks like a valid negative answer when you actually failed to answer. Failing loudly beats lying quietly.
+- Retry-After: 10 matches the breaker's open window so well-behaved clients back off instead of hammering us.
+
+**D-49 · No offset pagination — radius expansion instead ⭐**
+
+- Because: ⭐ offset pagination assumes a stable ordering between requests. Our drivers move every four seconds — by the time page 2 is requested the distance ordering has changed, so you'd get duplicates on some pages and silently skip others. ⭐ You cannot paginate a result set that reorders itself.
+- Instead: a caller needing more candidates re-queries with a larger radius — semantically a different question with a naturally superset answer. That's why the API exposes radiusMetres, not offset.
+- Tradeoff: ⚠️ No way to walk a large result set incrementally. A caller wanting 400 drivers must fetch all 400 at once (bounded by limit ≤ 500 and the radius cap).
+
+**D-50 · Return metadata, not a bare array**
+
+- Because: a bare list can't distinguish "searched and found nothing" from "found 400 and gave you 50." NearbyResponse carries totalFound, truncated, radiusMetres, cellsScanned, originCell.
+- Capture totalFound before truncating — after subList() the information is gone.
+- An empty result still returns full metadata, so the caller knows what radius and how many cells were actually searched.
+
+**D-51 · Cassandra for history (LSM-tree over B-tree)**
+
+- Because: the capacity math (~2.16 TB/day raw, PB/year) rules out a single node — but the deeper fit is the write pattern. An LSM write appends to a memtable + commit log and returns: no seek, no read-before-write, no in-place update. A B-tree update must locate the page, read, modify, and write back — random I/O. Our workload is enormous write volume, no updates ever, and reads that are always "contiguous time range for one key." ⭐ For a firehose of appends, LSM is simply the right shape.
+- 🔹 Corollary: INSERT and UPDATE are the same operation — a new cell with a timestamp, latest wins at read. No existence check, so writes are naturally idempotent when the primary key identifies the logical event (exploited in 4.2).
+- Tradeoff: ⚠️ No joins, no cross-partition aggregation, no query planner to rescue a badly-shaped query. Reads are only efficient along the paths you designed for.
+
+**D-52 · Query-driven modelling: one table per query ⭐**
+
+- Because: Cassandra inverts relational modelling — start from the queries, not the entities. A table not shaped for a query makes that query impossible (or ALLOW FILTERING, i.e. a cluster scan).
+- Denormalization is correct here: every ping is written to two tables. ⭐ Safe because the data is immutable — a past location never changes, so the copies cannot diverge. No update anomaly without updates.
+- ⭐ General rule: duplicate freely when the data is immutable; be very careful when it isn't. (Applies equally to caches, materialized views, CQRS read models.)
+- Tradeoff: ⚠️ Write volume doubles — ~4.3 TB/day instead of 2.16. The alternative (one table + app-side filtering) means scanning partitions you don't need, which is far worse at read time and doesn't scale.
+
+**D-53 · Every partition key carries a time bucket 🔥**
+
+- Because: all rows for one partition key live on one node, so an unbounded partition is unbounded data on one machine. Guideline: < ~100 MB, ideally < 100,000 rows. The "obvious" PRIMARY KEY (driver_id, ts) grows forever — ~1M rows/108 MB after 50 days, ~7.9M rows/790 MB after a year. ⚠️ A partition key with no natural bound is a time bomb that detonates months after you ship.
+- Tradeoff: ⚠️ A multi-bucket query touches N partitions instead of 1. ⭐ One large unbounded read traded for several small bounded ones — the right trade, since the small ones are predictable and run in parallel.
+
+**D-54 · Bucket width derived per table from row accumulation rate ⭐⭐**
+
+| Table | Partition key | Row rate per key | Bucket | Rows/partition |
+|---|---|---|---|---:|
+| `driver_trajectory` | `(driver_id, day)` | 1 driver × 900/hr | daily | ~21,600 |
+| `cell_occupancy` | `(h3_cell, hour_bucket)` | ~200 drivers × 900/hr | hourly | ~180,000 |
+
+- Because: occupancy's key collects from a crowd, not one source — a daily bucket would hold 4.3 million rows. Same technique, ~8× the concentration, so the bucket narrows to land in the same safe range.
+- ⭐ Bucket width is not a project-wide convention — it's derived per table from how fast that table's partition key accumulates rows.
+
+**D-55 · Composite partition key syntax — the double parentheses**
+
+- PRIMARY KEY ((driver_id, day), ts) — the inner parens make (driver_id, day) the partition key.
+- ⚠️ PRIMARY KEY (driver_id, day, ts) is valid CQL that compiles, runs, and slowly destroys your cluster — it partitions by driver alone, silently recreating the unbounded partition D-53 exists to prevent.
+
+**D-56 · driver_id as a clustering column in cell_occupancy**
+
+- Because: two drivers pinging in the same millisecond share (partition, ts). An insert with an existing primary key is an upsert — one would silently overwrite the other, with no error, warning, or log line. In a busy cell that happens constantly.
+- ⭐ Clustering columns must collectively guarantee uniqueness. In a relational store a duplicate key throws; here it succeeds and eats your data.
+
+**D-57 · CLUSTERING ORDER BY (ts DESC)**
+
+- Physical sort order should match your dominant read direction.
+- Because: rows are physically stored in clustering order. "Recent history" is the dominant read, and reading from the front of a partition beats seeking into it.
+
+**D-58 · TimeWindowCompactionStrategy over the default SizeTiered**
+
+- Because: STCS merges SSTables by size, repeatedly rewriting old immutable data for no benefit. TWCS groups SSTables by time window and stops compacting a window once it closes — far less write amplification. Combined with TTL, expired data drops as whole SSTables instead of scattering tombstones.
+- Windows: 1 day for trajectory, 6 hours for occupancy — matched to each table's bucket and volume.
+- Tradeoff: ⚠️ TWCS assumes data arrives roughly in time order. Heavily out-of-order writes (e.g. a device flushing a days-old buffer) land in old windows and defeat it. Acceptable for us — pings are near-real-time.
+
+**D-59 · TTL as the retention policy: 30 days / 7 days**
+
+- Because: keeping raw 4-second pings forever is impossible (~6.5 TB/day with RF 3). A row-level default_time_to_live makes expiry automatic, and TWCS makes it cheap.
+- Different per table: trajectory (trip history, disputes) keeps 30 days; occupancy (analytics, higher volume) keeps 7 days. Retention is set per table, by purpose.
+- Tradeoff: ⚠️ Raw history older than 30 days is gone. Production would downsample (1 point/minute) and tier to S3 before expiry.
+
+**D-60 · NetworkTopologyStrategy from day one, even with one DC**
+
+- Because: SimpleStrategy ignores racks and DCs, so all replicas can land in one rack — one rack failure loses the data. Migrating Simple → NTS on a live cluster is a risky manual procedure.
+- ⚠️ RF=1 is dev-only. Production: 'datacenter1': 3 to survive a node loss and read at QUORUM.
+
+**D-61 · Multi-bucket reads as parallel single-partition queries, not IN**
+
+- Because: IN (day1, day2, …) routes through a single coordinator that fans out and gathers — an anti-pattern at scale. The app issues one query per bucket, in parallel, and merges.
+- ⭐ You always know exactly how many partitions a query touches — which is precisely the predictability that lets Cassandra scale.
+
+
 
 
 ---
@@ -440,14 +556,24 @@ record LocationPing(
 | Redis (dedup) | `dedup:ping:{driverId}:{timestamp}` | `SET NX EX 300` |
 | Redis (current) | `driver:{id}:loc` — *Phase 3* | O(1) position lookup |
 | Redis (spatial) | `cell:{h3Cell}` set — *Phase 3* | k-ring proximity search |
-| Cassandra | `(driverId, day)` clustered by ts — *Phase 4* | Trajectory |
-| Cassandra | `(h3Cell, time-bucket)` — *Phase 4* | Hex occupancy |
+
+Cassandra : 
+
+| Table | Partition key | Clustering | Bucket | TTL | Compaction |
+|---|---|---|---|---|---|
+| `driver_trajectory` | `(driver_id, day)` | `ts DESC` | daily | 30d | TWCS, 1-day windows |
+| `cell_occupancy` | `(h3_cell, hour_bucket)` | `ts DESC, driver_id` | hourly | 7d | TWCS, 6-hour windows |
+
+Storage layout: the partition key is hashed to a token that picks the node — ⚠️ drv-01 on consecutive days lands on unrelated nodes; there is no "nearby" in token space. Within a partition, rows are written contiguously in ts DESC order, so a range query binary-searches to an offset and reads forward. Range queries are nearly free inside a partition and impossible across them.
+
+The hash is one-way: key → node is trivial, node → key is impossible. That is why a query missing any partition-key component fails with ALLOW FILTERING — the error is the model enforcing itself.
+
 
 > Same data, **two Cassandra tables** — query-driven modeling: one schema per access pattern.
 
 ### API contract
 | Method | Path | Status | Store |
-|---|---|---|---|
+|---|---|-------|---|
 | `POST` | `/v1/locations` | `202` / `400` | → Kafka |
 | `POST` | `/v1/locations/batch` | `202` / `400` | → Kafka (max 100) |
 | `GET` | `/v1/drivers/{id}/location` | `200` / **`404` = offline** | Redis |
@@ -456,6 +582,8 @@ record LocationPing(
 | `GET` | `/v1/cells/count?lat=&lng=` | `200` | Redis · resolves the cell for you |
 | `GET` | `/v1/drivers/{id}/trajectory` *(P4)* | `200` | Cassandra |
 | `GET` | `/v1/cells/{h3}/occupancy` *(P4)* | `200` | Cassandra |
+
+
 > 🔹 **Presence for free:** the `404` isn't a special case — we store **no "offline" flag.** TTL expiry *is* the offline signal.
 
 **The Query Algorithm :** 
@@ -474,29 +602,37 @@ record LocationPing(
 
 ## 7. Failure modes
 
-| Failure | Behaviour | Recovery | Data loss? |
-|---|---|---|---|
-| Ingestion pod dies | LB routes elsewhere (stateless) | Auto | In-flight requests only |
-| Kafka publish fails after `202` | Logged (soon: counted) | **None** — response already sent | ⚠️ **Yes, that ping.** Licensed by N4. For payments → **transactional outbox** |
-| Producer buffer full | `send()` **blocks** → backpressure to HTTP | Auto on drain | No |
-| Consumer pod dies | Partitions reassigned | Auto (cooperative) | No — resumes from last commit |
-| Consumer crashes mid-batch | Uncommitted records **redelivered** | Auto | No — but **duplicates** (→ dedup) |
-| Poison message | 1 attempt → **DLT**, partition keeps moving | Manual: inspect, fix, replay | No — quarantined with metadata |
-| Cassandra transient failure | Retry 1s → 2s → 4s → DLT | Auto | No, if it recovers in 7 s |
-| Redis down (dedup) | **Fail open** — process anyway | Auto | No — possible duplicates |
-| Slow consumer > poll deadline | **Evicted → rebalance** | Auto, ⚠️ but can cascade into a **rebalance storm** | No |
-| Consumer down > 6 h | Backlog **expires** | ⚠️ **Manual — data lost** | ⚠️ Yes |
-| Driver crosses cell boundary | Pings on different partitions, **no ordering** | Last-write-wins on timestamp | No — brief backwards jump |
-| Hot cell (stadium) | One partition overloaded, lag grows | ⚠️ **Not yet handled — Phase 5.2** | No, but freshness degrades |
-| Driver stops pinging | Hash TTL expires → treated as offline | Auto on next ping | No — by design |
-| Driver moves between cells   | SREM old + ZADD new in one pipeline  |Auto   |  No              |
-| Cell goes completely silent    |⚠️ Stale members never swept  |⚠️ Not handled — Phase 5 |No — reads filter by score; memory leaks|
-|Out-of-order ping (boundary race)|Skipped by the stale-write guard | Auto  |⚠️ Yes, that ping — correct behaviour  |
-| Device clock skew| Valid updates may be suppressed by last-write-wins |⚠️ Not handled | ⚠️ Possible — chaos C-08 |
-| Driver hash expires between the two query round trips|Candidate skipped   | Auto | 	No — two non-atomic reads of expiring data, correctly handled |
-|Query radius over the cap |400 before any Redis work   |— | No — guard, not a failure |
-| Reader freshness floor > writer TTL  |  ⚠️ Returns indexed drivers whose position is gone | Config must match  | No, but empty/partial results                         |
-|                  |                                                    |               |                          |
+| Failure                                               | Behaviour                                        | Recovery                                            | Data loss? |
+|-------------------------------------------------------|--------------------------------------------------|-----------------------------------------------------|---|
+| Ingestion pod dies                                    | LB routes elsewhere (stateless)                  | Auto                                                | In-flight requests only |
+| Kafka publish fails after `202`                       | Logged (soon: counted)                           | **None** — response already sent                    | ⚠️ **Yes, that ping.** Licensed by N4. For payments → **transactional outbox** |
+| Producer buffer full                                  | `send()` **blocks** → backpressure to HTTP       | Auto on drain                                       | No |
+| Consumer pod dies                                     | Partitions reassigned                            | Auto (cooperative)                                  | No — resumes from last commit |
+| Consumer crashes mid-batch                            | Uncommitted records **redelivered**              | Auto                                                | No — but **duplicates** (→ dedup) |
+| Poison message                                        | 1 attempt → **DLT**, partition keeps moving      | Manual: inspect, fix, replay                        | No — quarantined with metadata |
+| Cassandra transient failure                           | Retry 1s → 2s → 4s → DLT                         | Auto                                                | No, if it recovers in 7 s |
+| Redis down (dedup)                                    | **Fail open** — process anyway                   | Auto                                                | No — possible duplicates |
+| Slow consumer > poll deadline                         | **Evicted → rebalance**                          | Auto, ⚠️ but can cascade into a **rebalance storm** | No |
+| Consumer down > 6 h                                   | Backlog **expires**                              | ⚠️ **Manual — data lost**                           | ⚠️ Yes |
+| Driver crosses cell boundary                          | Pings on different partitions, **no ordering**   | Last-write-wins on timestamp                        | No — brief backwards jump |
+| Hot cell (stadium)                                    | One partition overloaded, lag grows              | ⚠️ **Not yet handled — Phase 5.2**                  | No, but freshness degrades |
+| Driver stops pinging                                  | Hash TTL expires → treated as offline            | Auto on next ping                                   | No — by design |
+| Driver moves between cells                            | SREM old + ZADD new in one pipeline              | Auto                                                |  No |
+| Cell goes completely silent                           | ⚠️ Stale members never swept                     | ⚠️ Not handled — Phase 5                            |No — reads filter by score; memory leaks|
+| Out-of-order ping (boundary race)                     | Skipped by the stale-write guard                 | Auto                                                |⚠️ Yes, that ping — correct behaviour |
+| Device clock skew                                     | Valid updates may be suppressed by last-write-wins | ⚠️ Not handled                                      | ⚠️ Possible — chaos C-08 |
+| Driver hash expires between the two query round trips | Candidate skipped                                | Auto                                                | 	No — two non-atomic reads of expiring data, correctly handled |
+| Query radius over the cap                             | 400 before any Redis work                        | —                                                   | No — guard, not a failure |
+| Reader freshness floor > writer TTL                   | ⚠️ Returns indexed drivers whose position is gone | Config must match                                   | No, but empty/partial results  |
+| Redis slow (not down)                                 |Timeout at 200 ms → breaker trips after 10 calls → instant 503  | Auto, half-open after 10 s                          | No |
+| Redis down (read path)                                | nearby/location → 503; cellCount → -1               | nearby/location → 503; cellCount → -1               | No — and no false negatives   |
+| Query pod restarts                                    | Per-instance cache empties, refills on demand                                    | Auto                                                | No   |
+| Partially-written driver hash                         |      Treated as no record → 404                                 | Next ping repairs it                                | No   |
+| Query missing a partition-key component               | Rejected (ALLOW FILTERING required) | Fix the query                                       | No — guard, not failure     |
+| Two drivers ping in the same ms, same cell            | Distinct rows (driver_id clustering)    | -                                                   | No — would be silent loss without D-56     |
+| Busy cell concentrates writes                         |  ⚠️ Hot partition on one Cassandra node  | ⚠️ Not handled — Phase 5.2                          | No, but node load skews     |
+| Row reaches TTL                                       | Dropped with its SSTable (TWCS) | -  | By design — retention policy     |
+| Single Cassandra node lost (RF=1, dev)                | ⚠️ Data unavailable | ⚠️ Manual  |⚠️ Yes in dev; RF=3 in prod  |
 
 
 
@@ -521,6 +657,16 @@ record LocationPing(
 | `max-accuracy-metres = 100` | **Guess** — externalized because the right value is discovered in production |
 |presence-ttl-seconds = 30 |  Derived from the 4 s ping cadence (~7 tolerated misses) |
 |radiusMetres max = 10000, limit max = 500 |Chosen — DoS ceilings, sized so worst-case k-ring stays ~1,100 cells|
+| Redis timeout = 200ms                                         |    Derived — 2× the 100 ms whole-query p99 SLO                                                                |
+|  Breaker: 50% over 20 calls, min 10, 10 s open                                        |  Chosen — standard Resilience4j starting point, to be tuned under load                                                                  |
+| cellCount cache TTL = 5 s                                                                                      | Chosen — staleness a density figure tolerates                                                                                                                                        |
+|  Cache maximumSize = 10_000                                                                                     | Chosen — a city has hundreds of active cells; bounded memory over hit rate                                                                                                                                        |
+| Trajectory bucket = daily | **Derived** — 1 driver × 21,600 rows/day ≈ 2 MB |
+| Occupancy bucket = hourly | **Derived** — ~200 drivers × 900/hr ≈ 180k rows; daily would be 4.3M |
+| ~200 drivers per busy res-9 cell | ⚠️ **ESTIMATE** from ~2,000 drivers/km² dense-city density — verify with real data |
+| Partition guideline < 100 MB / < 100k rows | **Industry guideline**, not a hard limit |
+| TTL 30d / 7d | Chosen by purpose (trip history vs analytics) |
+| Keyspace RF = 1 | ⚠️ **Dev only** |                                                                                                                |                                                                                                                                                                                                                   |
 
 ### The poll-deadline arithmetic
 ```
@@ -545,7 +691,9 @@ degraded  500 × 800ms = 400s    vs 300s   ❌ EVICTED → rebalance storm
 | **`auto-offset-reset`**          | ⚠️ Applies **only when there is no committed offset**. It is *not* "where to resume after restart." |
 | **PowerShell**                   | Mangles `-D` args. Quote the whole argument, or use `$env:VAR`. |
 | **RedisCallback serialization**  |🔥 Asymmetric: you SEND raw bytes but RECEIVE deserialized objects. The callback gives you the low-level connection for writing; the template still owns reading, and StringRedisTemplate's serializer has already converted results. (byte[]) casts on results throw ClassCastException. For bytes both ways: RedisTemplate<byte[], byte[]> with RedisSerializer.byteArray().  |
-|                                  ||
+| **Composite partition key syntax** | 🔥 `((a, b), c)` vs `(a, b, c)` — both valid CQL, radically different storage. The wrong one compiles and silently creates unbounded partitions. |
+| **Duplicate primary key** | 🔥 An upsert, not an error. Missing a uniqueness-guaranteeing clustering column loses data with no signal. |
+| **IntelliJ `.cql` files** | No built-in CQL file type — create via **New → File** with the full name, or map `*.cql` to SQL for highlighting. |
 
 ---
 
@@ -576,6 +724,8 @@ Everything is built **except the writes themselves.** `toProcess` is assembled a
 - ⚠️ Throughput numbers are **estimates**, not measurements (Phase 6.2)
 - ⚠️ No integration tests — only an HTTP-level Postman suite; downstream assertions are manual
 - 🗑️ `SpatialDebugController` is temporary — delete in Phase 3
+- ⚠️ No downsampling or cold tiering — raw history simply expires at TTL
+- ⚠️ Schema managed by a hand-applied .cql file, not a versioned migration tool
 
 ---
 
@@ -624,6 +774,18 @@ For each experiment: state the **hypothesis** first, define the **blast radius**
 **C-10 · Rolling deploy under load**
 *Hypothesis:* `CooperativeStickyAssignor` keeps most partitions processing; lag rises modestly rather than topic-wide.
 
+**C-11 · Redis slow, not dead (inject 2 s latency via Toxiproxy) ⭐**
+
+*Hypothesis:* per D-46/D-47 — timeouts fire at 200 ms, the breaker trips after 10 calls, responses become instant 503s, and /actuator/health keeps responding. This is the experiment that tests the "slow is worse than dead" claim directly — the most valuable of the read-path experiments.
+
+**C-12 · Cache stampede on a hot cell**
+
+*Hypothesis:* per D-45 — at TTL expiry, concurrent requests for one cell all miss simultaneously. Does the ZCOUNT burst matter at all? If it does, we implement single-flight; if not, the decision to skip it is validated.
+
+**C-13 · Hot cell in Cassandra**
+
+*Hypothesis:* concentrating traffic into one res-9 cell makes its cell_occupancy partition grow fastest and loads one Cassandra node disproportionately, while driver_trajectory stays evenly spread (it's keyed by driver). Pair with C-06 — the same hot-cell load should reveal the hot-partition problem in both Kafka and Cassandra simultaneously.
+
 ### Tooling
 `docker compose stop/start` for process kills · **Toxiproxy** or `tc netem` for latency/partition injection · **k6** for sustained load · **Grafana** for the lag/latency/throughput curves that make each experiment legible.
 
@@ -647,3 +809,9 @@ The soundbites worth having ready:
 12. **Non-technical version:** *"I'm building the part of Uber that quietly watches millions of moving cars at once and always knows who's where."*
 13. **Why not GEOSEARCH:** *"GEOSEARCH is simpler and more accurate, and I'd use it for a single-node system. We use H3 cell sets because a GEO index lives in one key and therefore one node — it can't shard. Our cell keys distribute naturally across a cluster. We're also already carrying H3 cells for Kafka partitioning and Cassandra keys, so cells double as a unit of aggregation for downstream services, not just a search index."*
 14. **The over-inclusion filter:** *"k-rings return cells that overlap the radius, and a hexagon disk isn't a circle — so the cells are a coarse filter to find candidates cheaply, and true haversine distance is the fine filter. Skip that step and a 2 km query returns drivers 2.4 km away."*
+15. **Failing honestly:** *"During a Redis outage, a 404 on driver location would tell a matching engine that every driver in the fleet is offline, and an empty nearby list would tell the pricing engine the city has no supply. Both are actionable lies. We return 503 — never a value that looks like a valid negative answer when you actually failed to answer."*
+16. **Why no pagination:** *"Offset pagination assumes a stable ordering between requests, and our drivers move every four seconds — page 2 would duplicate some and skip others. You can't paginate a result set that reorders itself. A caller needing more candidates expands the radius, which is a different question with a superset answer."*
+17. **The caching test:** *"We cache cell density but not nearby search. The test isn't 'is it a read' — it's 'is it repeated or expensive, AND does it tolerate staleness?' Nearby search is already two round trips to memory, and staleness is exactly what we're fighting."*
+18. **Immutability licenses denormalization:** *"We write every ping to two tables — one keyed by driver, one by cell. In a relational system that's a divergence hazard. Here it's safe because the data is immutable: a past location never changes, so the copies can't drift apart. The rule is duplicate freely when data is immutable, be careful when it isn't."*
+19. **Deriving bucket width:** *"Both tables use time-bucketed partition keys, but different widths. Trajectory is one driver per partition, so daily buckets give about 21,000 rows. Occupancy collects every driver in a cell — about eight times the rate — so a daily bucket would hold 4.3 million rows. Hourly brings it back to 180,000. Bucket width isn't a convention; it's derived from how fast each key accumulates rows."*
+20. **The same failure at two layers:** *"Partitioning by location creates a hot-partition risk in Kafka and again in Cassandra's occupancy table — same cause, geography is unevenly populated, and the same family of fixes."*

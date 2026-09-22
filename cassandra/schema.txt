@@ -1,0 +1,99 @@
+-- GeoPulse Cassandra schema
+-- Apply with:
+--   docker compose exec -T cassandra cqlsh < cassandra/schema.cql
+
+-- ============================================================
+-- KEYSPACE
+-- ============================================================
+-- NetworkTopologyStrategy even with ONE datacenter: SimpleStrategy ignores
+-- rack/DC topology (all replicas can land in one rack, so one rack failure
+-- loses data), and migrating Simple -> NTS on a live cluster is a risky
+-- manual procedure. Use NTS from day one.
+--
+-- RF=1 is DEV ONLY. Production: 'datacenter1': 3 — survive a node loss and
+-- read at QUORUM. With RF=1 there is NO redundancy.
+CREATE KEYSPACE IF NOT EXISTS geopulse
+WITH replication = {
+    'class': 'NetworkTopologyStrategy',
+    'datacenter1': 1
+};
+
+USE geopulse;
+
+-- ============================================================
+-- TABLE 1 — driver_trajectory
+-- Query: "Where has THIS DRIVER been between T1 and T2?"
+-- ============================================================
+CREATE TABLE IF NOT EXISTS driver_trajectory (
+    driver_id   text,
+    day         date,
+    ts          timestamp,
+    lat         double,
+    lng         double,
+    h3_cell     text,
+    speed       double,
+    heading     double,
+    accuracy    double,
+
+    -- NOTE THE DOUBLE PARENTHESES. (driver_id, day) is a COMPOSITE PARTITION
+    -- KEY. Writing PRIMARY KEY (driver_id, day, ts) is valid CQL that compiles,
+    -- runs, and slowly destroys your cluster — it partitions by driver alone,
+    -- so the partition grows FOREVER (~790MB after a year vs the ~100MB
+    -- guideline). The `day` bucket is what bounds it at ~21,600 rows.
+    PRIMARY KEY ((driver_id, day), ts)
+)
+-- Newest first: "recent history" is the dominant read, and reading from the
+-- front of a partition beats seeking into it. Physical sort order should
+-- match your dominant read direction.
+WITH CLUSTERING ORDER BY (ts DESC)
+
+-- TimeWindowCompactionStrategy, not the default SizeTiered. STCS merges by
+-- size, repeatedly rewriting old immutable data for no benefit. TWCS groups
+-- SSTables into time windows and STOPS compacting a window once closed —
+-- far less write amplification, and expired data drops as whole SSTables
+-- rather than scattering tombstones.
+AND compaction = {
+    'class': 'TimeWindowCompactionStrategy',
+    'compaction_window_unit': 'DAYS',
+    'compaction_window_size': 1
+}
+
+-- 30-day retention. The capacity math (Session 0.1) makes keeping raw 4-second
+-- pings forever impossible: ~6.5 TB/day with replication. Production pairs
+-- this with downsampling (1 point/minute) + cold tiering to S3.
+AND default_time_to_live = 2592000;
+
+-- ============================================================
+-- TABLE 2 — cell_occupancy
+-- Query: "Which drivers were in THIS CELL between T1 and T2?"
+-- ============================================================
+CREATE TABLE IF NOT EXISTS cell_occupancy (
+    h3_cell     text,
+    hour_bucket timestamp,
+    ts          timestamp,
+    driver_id   text,
+    lat         double,
+    lng         double,
+
+    -- HOURLY buckets, not daily — derived from the row accumulation rate:
+    --   ~200 drivers/cell × 900 pings/hour = 180,000 rows/HOUR
+    --   daily bucket  -> 4.3 MILLION rows/partition  ✗
+    --   hourly bucket -> 180,000 rows/partition      ✓
+    -- Same technique as table 1, different width, because this key
+    -- accumulates ~8x faster. Bucket width is DERIVED, not conventional.
+    --
+    -- driver_id is a clustering column so the key is UNIQUE: without it, two
+    -- drivers pinging in the same millisecond collide and one silently
+    -- overwrites the other. Clustering columns must collectively guarantee
+    -- uniqueness or you lose data with NO error.
+    PRIMARY KEY ((h3_cell, hour_bucket), ts, driver_id)
+)
+WITH CLUSTERING ORDER BY (ts DESC)
+AND compaction = {
+    'class': 'TimeWindowCompactionStrategy',
+    'compaction_window_unit': 'HOURS',
+    'compaction_window_size': 6
+}
+-- 7 days, not 30: this is the analytics table (shorter horizon) and the
+-- higher-volume one. Different table, different retention, set independently.
+AND default_time_to_live = 604800;
