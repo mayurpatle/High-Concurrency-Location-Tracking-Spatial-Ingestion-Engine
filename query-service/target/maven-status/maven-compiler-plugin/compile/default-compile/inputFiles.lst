@@ -3,4 +3,8 @@ D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-
 D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\query-service\src\main\java\com\geopulse\query\exception\QueryExceptionHandler.java
 D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\query-service\src\main\java\com\geopulse\query\exception\SpatialUnavailableException.java
 D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\query-service\src\main\java\com\geopulse\query\QueryServiceApplication.java
+D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\query-service\src\main\java\com\geopulse\query\repository\OccupancyRepository.java
+D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\query-service\src\main\java\com\geopulse\query\repository\TrajectoryRepository.java
 D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\query-service\src\main\java\com\geopulse\query\service\NearbyDriverService.java
+D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\query-service\src\main\java\com\geopulse\query\service\OccupancyService.java
+D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\query-service\src\main\java\com\geopulse\query\service\TrajectoryService.java

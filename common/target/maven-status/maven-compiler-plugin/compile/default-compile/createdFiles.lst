@@ -2,6 +2,10 @@ com\geopulse\common\spatial\H3IndexService.class
 com\geopulse\common\dto\NearbyResponse.class
 com\geopulse\common\spatial\H3Resolution.class
 com\geopulse\common\dto\LocationPingRequest.class
+com\geopulse\common\dto\OccupancyRecord.class
+com\geopulse\common\dto\TrajectoryResponse.class
+com\geopulse\common\dto\OccupancyResponse.class
 com\geopulse\common\dto\NearbyDriver.class
+com\geopulse\common\dto\TrajectoryPoint.class
 com\geopulse\common\history\TimeBuckets.class
 com\geopulse\common\model\LocationPing.class

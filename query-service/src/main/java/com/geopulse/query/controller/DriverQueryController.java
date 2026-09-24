@@ -2,16 +2,22 @@ package com.geopulse.query.controller;
 
 import com.geopulse.common.dto.NearbyDriver;
 import com.geopulse.common.dto.NearbyResponse;
+import com.geopulse.common.dto.OccupancyResponse;
+import com.geopulse.common.dto.TrajectoryResponse;
 import com.geopulse.common.spatial.H3IndexService;
 import com.geopulse.query.exception.SpatialUnavailableException;
 import com.geopulse.query.service.NearbyDriverService;
+import com.geopulse.query.service.OccupancyService;
+import com.geopulse.query.service.TrajectoryService;
 import jakarta.validation.constraints.*;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
@@ -29,6 +35,13 @@ import java.util.Map;
 public class DriverQueryController {
 
     private final NearbyDriverService nearbyDriverService;
+
+
+    private  final TrajectoryService trajectoryService   ;
+
+    private final OccupancyService occupancyService   ;
+
+
     private final StringRedisTemplate redis;
     private final H3IndexService h3IndexService;
 
@@ -113,5 +126,59 @@ public class DriverQueryController {
         return Map.of(
                 "h3Cell", cell,
                 "count",  nearbyDriverService.countInCell(cell));
+    }
+
+    /**
+     * GET /v1/drivers/{id}/trajectory?from=&to=&cursor=&limit=&sampleSeconds=
+     *
+     * Served from CASSANDRA, not Redis — this is the "then" question. Note
+     * there is no circuit breaker here: unlike the hot path, this is not
+     * latency-critical, and Cassandra's own timeouts already bound it.
+     * TODO(Phase 7): revisit if history reads get user-facing SLOs.
+     */
+    @GetMapping("/drivers/{driverId}/trajectory")
+    public TrajectoryResponse trajectory(
+            @PathVariable String driverId,
+
+            // ISO-8601 instants, e.g. 2026-09-21T00:00:00Z. Explicit UTC in the
+            // wire format, matching TimeBuckets — no ambiguity about whose day.
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant from,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant to,
+
+            @RequestParam(required = false) String cursor,
+
+            // Bounded: one page, not one day. 21,600 points would be ~2MB.
+            @RequestParam(defaultValue = "1000") @Positive @Max(5000) int limit,
+
+            // Optional downsampling for map rendering.
+            @RequestParam(required = false) @Positive @Max(3600) Integer sampleSeconds) {
+
+        if (from.isAfter(to)) {
+            throw new IllegalArgumentException("from must be before to");
+        }
+
+        return trajectoryService.trajectory(driverId, from, to, cursor, limit, sampleSeconds);
+    }
+
+    /**
+     * GET /v1/cells/{h3Cell}/occupancy?from=&to=&cursor=&limit=
+     *
+     * Contrast with GET /v1/cells/{h3}/count, which answers "how many are here
+     * RIGHT NOW" from Redis in O(log n). This is the same question asked of the
+     * past, and it costs a partition read per hour in the range. Two stores,
+     * two questions, separated by time — exactly the split from Session 0.1.
+     */
+    @GetMapping("/cells/{h3Cell}/occupancy")
+    public OccupancyResponse occupancy(
+            @PathVariable String h3Cell,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant from,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant to,
+            @RequestParam(required = false) String cursor,
+            @RequestParam(defaultValue = "1000") @Positive @Max(5000) int limit) {
+
+        if (from.isAfter(to)) {
+            throw new IllegalArgumentException("from must be before to");
+        }
+        return occupancyService.occupancy(h3Cell, from, to, cursor, limit);
     }
 }

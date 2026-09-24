@@ -1,6 +1,10 @@
 D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\common\src\main\java\com\geopulse\common\dto\LocationPingRequest.java
 D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\common\src\main\java\com\geopulse\common\dto\NearbyDriver.java
 D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\common\src\main\java\com\geopulse\common\dto\NearbyResponse.java
+D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\common\src\main\java\com\geopulse\common\dto\OccupancyRecord.java
+D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\common\src\main\java\com\geopulse\common\dto\OccupancyResponse.java
+D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\common\src\main\java\com\geopulse\common\dto\TrajectoryPoint.java
+D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\common\src\main\java\com\geopulse\common\dto\TrajectoryResponse.java
 D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\common\src\main\java\com\geopulse\common\history\TimeBuckets.java
 D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\common\src\main\java\com\geopulse\common\model\LocationPing.java
 D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\common\src\main\java\com\geopulse\common\spatial\H3IndexService.java

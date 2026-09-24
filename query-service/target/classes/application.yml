@@ -26,6 +26,7 @@ spring:
     port: 9042
     local-datacenter: datacenter1
     schema-action: none
+    keyspace-name: geopulse
 
 # no kafka block — query never touches the bus
 management:

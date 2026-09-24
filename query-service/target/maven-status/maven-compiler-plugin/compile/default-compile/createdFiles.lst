@@ -1,6 +1,10 @@
 com\geopulse\query\exception\SpatialUnavailableException.class
 com\geopulse\query\service\NearbyDriverService.class
+com\geopulse\query\service\OccupancyService.class
+com\geopulse\query\repository\OccupancyRepository.class
 com\geopulse\query\QueryServiceApplication.class
+com\geopulse\query\repository\TrajectoryRepository.class
+com\geopulse\query\service\TrajectoryService.class
 com\geopulse\query\config\CacheConfig.class
 com\geopulse\query\controller\DriverQueryController.class
 com\geopulse\query\exception\QueryExceptionHandler.class

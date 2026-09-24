@@ -30,4 +30,13 @@ public class QueryExceptionHandler {
                         "error", "Spatial store temporarily unavailable",
                         "timestamp", Instant.now().toString()));
     }
+
+
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<Map<String, Object>> handleBadRequest(IllegalArgumentException ex) {
+        return ResponseEntity.badRequest().body(Map.of(
+                "status", 400,
+                "error", ex.getMessage(),
+                "timestamp", Instant.now().toString()));
+    }
 }
