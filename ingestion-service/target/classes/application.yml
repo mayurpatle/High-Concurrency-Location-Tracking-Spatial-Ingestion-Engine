@@ -92,3 +92,6 @@ geopulse:
     topic: driver-location-pings
   ingestion:
     max-accuracy-metres: 100.0
+  hotcell:
+    refresh-ms: 5000
+    salt: 4

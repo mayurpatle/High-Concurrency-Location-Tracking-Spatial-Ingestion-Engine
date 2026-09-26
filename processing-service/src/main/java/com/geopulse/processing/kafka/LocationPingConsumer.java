@@ -2,6 +2,7 @@ package com.geopulse.processing.kafka;
 
 import com.geopulse.common.model.LocationPing;
 import com.geopulse.processing.exception.NonRetryableException;
+import com.geopulse.processing.service.CellActivityTracker;
 import com.geopulse.processing.service.DeduplicationService;
 import com.geopulse.processing.service.RedisLocationWriter;
 import lombok.RequiredArgsConstructor;
@@ -31,6 +32,9 @@ import java.util.List;
 public class LocationPingConsumer {
 
     private final DeduplicationService deduplicationService;
+
+    private final CellActivityTracker activityTracker   ;
+
 
     private final RedisLocationWriter redisLocationWriter;   // ← add
 
@@ -91,6 +95,25 @@ public class LocationPingConsumer {
         // retries transient Redis failures with backoff. Catching it would
         // silently convert at-least-once into at-most-once.
         redisLocationWriter.writeAll(toProcess);
+
+        // below two are  usefull for consistent hashing purpose
+        // Record AFTER the write succeeds — if the write throws, the batch is
+        // redelivered and we'd otherwise count those pings twice.
+        int partition = records.get(0).partition();
+        for (LocationPing ping : toProcess) {
+            activityTracker.record(partition, ping);
+        }
+
+        // Flush per batch. A batch is our natural flush interval: it already
+        // bounds how much work is in flight, and flushing here means at most
+        // one batch of counts is ever at risk.
+        //
+        // NOTE: a batch can span partitions when one thread owns several, so
+        // this flushes only the first record's partition. The rest flush on
+        // their own batches or at revocation.
+        // TODO(Phase 6): flush all partitions touched by this batch, and
+        // measure whether a time-based interval beats per-batch.
+        activityTracker.flushPartition(partition);
 
 
         // TODO(Phase 4): cassandraWriter.writeAll(toProcess) — one batched call  - done ✅

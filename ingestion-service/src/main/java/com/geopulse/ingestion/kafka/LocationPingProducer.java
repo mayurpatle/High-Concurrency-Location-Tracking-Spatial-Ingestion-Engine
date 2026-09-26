@@ -1,6 +1,7 @@
 package com.geopulse.ingestion.kafka;
 
 import com.geopulse.common.model.LocationPing;
+import com.geopulse.ingestion.service.HotCellRegistry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -26,6 +27,9 @@ public class LocationPingProducer {
     // background I/O thread, which is exactly what makes send() non-blocking.
     private final KafkaTemplate<String, LocationPing> kafkaTemplate;
 
+    private final HotCellRegistry hotCellRegistry    ;
+
+
     @Value("${geopulse.kafka.topic}")
     private String topic;
 
@@ -41,7 +45,11 @@ public class LocationPingProducer {
 
         // The partition key. Using h3PartitionCell (res 7, ~a neighbourhood)
         // rather than driverId is the whole locality strategy — see Session 1.2.
-        String key = ping.h3PartitionCell();
+        // The routing key MAY carry a salt suffix; the ping itself does not.
+        // The salt influences Kafka's partition choice and nothing else — it
+        // never reaches Redis or Cassandra. The split is a TRANSPORT concern,
+        // not a data-model one.
+        String key = hotCellRegistry.routingKey(ping.h3PartitionCell());
 
         kafkaTemplate.send(topic, key, ping)
                 // whenComplete registers a CALLBACK — it does not block.

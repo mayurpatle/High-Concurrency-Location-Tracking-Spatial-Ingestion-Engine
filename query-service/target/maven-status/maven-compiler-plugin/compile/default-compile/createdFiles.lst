@@ -8,3 +8,4 @@ com\geopulse\query\service\TrajectoryService.class
 com\geopulse\query\config\CacheConfig.class
 com\geopulse\query\controller\DriverQueryController.class
 com\geopulse\query\exception\QueryExceptionHandler.class
+com\geopulse\query\controller\AdminController.class

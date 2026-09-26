@@ -27,6 +27,8 @@
             <artifactId>spring-kafka</artifactId>
         </dependency>
 
+
+
         <!-- Redis client (Lettuce under the hood). The hot-state write path. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
