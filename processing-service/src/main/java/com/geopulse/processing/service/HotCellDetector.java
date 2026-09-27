@@ -1,8 +1,11 @@
 package com.geopulse.processing.service;
 
 import com.geopulse.common.spatial.HotCell;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -10,6 +13,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Finds cells carrying disproportionate load, and publishes the verdict to
@@ -22,7 +26,6 @@ import java.util.*;
  * store give you a global view for free.
  */
 @Service
-@RequiredArgsConstructor
 @Slf4j
 public class HotCellDetector {
 
@@ -46,6 +49,28 @@ public class HotCellDetector {
      *  partition holding part of the cell's state (Part 3). */
     @Value("${geopulse.hotcell.salt:4}")
     private int salt;
+
+
+    // Gauges read a value when scraped, rather than being incremented. Perfect
+    // for derived state that already exists — we compute this every scan
+    // anyway, so the gauge just publishes the latest.
+    //
+    // The AtomicLong holds the value between scans; Micrometer holds only a
+    // WEAK reference to a gauge's source object, so it must be a field or it
+    // gets collected and the gauge silently reports NaN. Classic Micrometer trap.
+    private final AtomicLong skewRatio = new AtomicLong(0);
+    private final AtomicLong hotCellCount = new AtomicLong(0);
+
+    @Autowired
+    public HotCellDetector(StringRedisTemplate redis, MeterRegistry registry) {
+        this.redis = redis;
+        Gauge.builder("geopulse.cells.skew.ratio", skewRatio, AtomicLong::get)
+                .description("Busiest cell's ping count as a multiple of the median")
+                .register(registry);
+        Gauge.builder("geopulse.cells.hot.count", hotCellCount, AtomicLong::get)
+                .description("Cells currently flagged as hot")
+                .register(registry);
+    }
 
     /**
      * Runs on a schedule, not per ping. Detection is cheap and slow-moving;
@@ -112,6 +137,10 @@ public class HotCellDetector {
             log.warn("Hot cells detected (median={}): {}", median,
                     hot.stream().map(h -> h.h3PartitionCell() + "@" + h.ratioToMedian() + "x").toList());
         }
+
+        long max = Collections.max(counts.values());
+        skewRatio.set(Math.round(max / median));
+        hotCellCount.set(hot.size());
     }
 
     /**

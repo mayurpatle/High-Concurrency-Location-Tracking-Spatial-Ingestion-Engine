@@ -136,6 +136,7 @@ services:
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - grafana-data:/var/lib/grafana       # persist dashboards + settings
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
     depends_on:
       - prometheus
     networks:
@@ -147,6 +148,7 @@ volumes:
   cassandra-data:
   prometheus-data:
   grafana-data:
+
 
 
 

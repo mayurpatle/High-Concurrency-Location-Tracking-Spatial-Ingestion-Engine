@@ -2,11 +2,11 @@ package com.geopulse.processing.kafka;
 
 import com.geopulse.common.model.LocationPing;
 import com.geopulse.processing.exception.NonRetryableException;
+import com.geopulse.processing.metrics.ProcessingMetrics;
 import com.geopulse.processing.service.CellActivityTracker;
 import com.geopulse.processing.service.DeduplicationService;
 import com.geopulse.processing.service.RedisLocationWriter;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.listener.BatchListenerFailedException;
@@ -16,27 +16,26 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Consumes location pings in BATCHES.
+ * Consumes location pings in BATCHES — the hot path.
  *
  * Why batch: each downstream round trip costs ~1ms whether it carries 1 record
  * or 500 — you pay for the TRIP, not the payload. Processing 500 records
  * individually means ~1000 round trips (~1s); batching means ~2 (~30ms).
  * Same insight as the producer's linger.ms, opposite end of the pipe.
  *
- * The partition guarantee still holds: each partition goes to exactly one
- * thread, so all records in a batch from a given partition are ours alone.
+ * The partition guarantee holds: each partition goes to exactly one thread, so
+ * all records in a batch from a given partition are ours alone — which is what
+ * lets the writer do an unguarded read-modify-write and the activity tracker
+ * use a plain HashMap.
  */
 @Component
 @RequiredArgsConstructor
-@Slf4j
 public class LocationPingConsumer {
 
     private final DeduplicationService deduplicationService;
-
-    private final CellActivityTracker activityTracker   ;
-
-
-    private final RedisLocationWriter redisLocationWriter;   // ← add
+    private final RedisLocationWriter redisLocationWriter;
+    private final CellActivityTracker activityTracker;
+    private final ProcessingMetrics metrics;
 
     @KafkaListener(
             topics = "${geopulse.kafka.topic}",
@@ -44,87 +43,79 @@ public class LocationPingConsumer {
     )
     public void consume(List<ConsumerRecord<String, LocationPing>> records) {
 
-        // Collect the records worth writing, so we can hand the whole set to
-        // Redis/Cassandra in ONE call each rather than looping with I/O inside.
-        List<LocationPing> toProcess = new ArrayList<>(records.size());
+        metrics.recordBatchSize(records.size());
+
+        // ---- PASS 1: validate and collect ----
+        List<LocationPing> candidates = new ArrayList<>(records.size());
 
         for (int i = 0; i < records.size(); i++) {
             ConsumerRecord<String, LocationPing> record = records.get(i);
             LocationPing ping = record.value();
 
-            // ---- Per-record validation ----
-            // BatchListenerFailedException carries the INDEX of the bad record.
-            // Spring then commits everything BEFORE it and sends only THAT
-            // record to the DLT — so one poison pill doesn't cost us the other
-            // 499. Without this, the whole batch would be redelivered.
             if (ping == null) {
-                redisLocationWriter.writeAll(toProcess);
+                flush(candidates);   // honour the BatchListenerFailedException promise
                 throw new BatchListenerFailedException(
                         "Undeserializable record at offset " + record.offset(),
                         new NonRetryableException("null payload"), i);
             }
             if (ping.driverId() == null || ping.h3Cell() == null) {
-                redisLocationWriter.writeAll(toProcess);
+                flush(candidates);
                 throw new BatchListenerFailedException(
                         "Missing required field at offset " + record.offset(),
                         new NonRetryableException("missing field"), i);
             }
 
-            // ---- Dedup ----
-            // TODO(perf): this is still one Redis round trip PER RECORD — the
-            // last un-batched I/O in this method. Redis supports pipelining
-            // SET NX, which would collapse 500 calls into 1. Deferred because
-            // it needs a Lua script or executePipelined to read back each
-            // result. Phase 6 load testing will tell us whether it matters.
-            if (!deduplicationService.claim(ping.driverId(), ping.timestamp())) {
-                continue;   // already processed — skip, offset still advances
-            }
+            candidates.add(ping);
+        }
 
-            toProcess.add(ping);
+        if (candidates.isEmpty()) {
+            return;
+        }
+
+        // ---- PASS 2: dedup the whole batch in ONE round trip ----
+        // Was 500 sequential round trips (~150ms). Now one.
+        List<Boolean> claimed = deduplicationService.claimAll(candidates);
+
+        List<LocationPing> toProcess = new ArrayList<>(candidates.size());
+        for (int i = 0; i < candidates.size(); i++) {
+            if (claimed.get(i)) {
+                toProcess.add(candidates.get(i));
+            } else {
+                metrics.deduplicated();
+            }
         }
 
         if (toProcess.isEmpty()) {
             return;
         }
 
-        // TODO(Phase 3): redisWriter.writeAll(toProcess)     — one pipelined call - done ✅
+        metrics.redisWriteTimer().record(() -> redisLocationWriter.writeAll(toProcess));
+        metrics.recordFreshness(toProcess.get(0).timestamp());
 
-        // Batched: one round trip to read previous state, one to write it all.
-        // An exception here propagates deliberately — it blocks the offset
-        // commit, triggering redelivery (at-least-once), and DefaultErrorHandler
-        // retries transient Redis failures with backoff. Catching it would
-        // silently convert at-least-once into at-most-once.
-        redisLocationWriter.writeAll(toProcess);
-
-        // below two are  usefull for consistent hashing purpose
-        // Record AFTER the write succeeds — if the write throws, the batch is
-        // redelivered and we'd otherwise count those pings twice.
         int partition = records.get(0).partition();
         for (LocationPing ping : toProcess) {
             activityTracker.record(partition, ping);
         }
-
-        // Flush per batch. A batch is our natural flush interval: it already
-        // bounds how much work is in flight, and flushing here means at most
-        // one batch of counts is ever at risk.
-        //
-        // NOTE: a batch can span partitions when one thread owns several, so
-        // this flushes only the first record's partition. The rest flush on
-        // their own batches or at revocation.
-        // TODO(Phase 6): flush all partitions touched by this batch, and
-        // measure whether a time-based interval beats per-batch.
         activityTracker.flushPartition(partition);
+    }
 
 
-        // TODO(Phase 4): cassandraWriter.writeAll(toProcess) — one batched call  - done ✅
-        // History is deliberately NOT written here. It runs in its own consumer
-        // group (LocationHistoryConsumer) so Cassandra's latency and outages can
-        // never touch hot-path freshness. See Session 4.2, Part 1.
-
-        // TEMPORARY: one line per BATCH, not per record. Even so this dies in
-        // Phase 3, replaced by a Micrometer counter — logging on the hot path
-        // is blocking disk I/O, which is what this architecture exists to avoid.
-        log.info("Processed batch: received={} written={} partition={}",
-                records.size(), toProcess.size(), records.get(0).partition());
+    /**
+     * Flush before throwing a BatchListenerFailedException.
+     *
+     * Its index is a PROMISE that records 0..i-1 were processed, and Spring
+     * commits their offsets on that basis. But note what changed: these
+     * candidates have NOT been deduped yet, so flushing them here may write a
+     * duplicate. That's acceptable — the Redis write is idempotent (ZADD +
+     * stale-write guard), and losing the records entirely would not be.
+     *
+     * A subtle consequence of batching dedup: the error path now trades a
+     * possible duplicate for guaranteed delivery. The old per-record version
+     * had already claimed them.
+     */
+    private void flush(List<LocationPing> pings) {
+        if (!pings.isEmpty()) {
+            metrics.redisWriteTimer().record(() -> redisLocationWriter.writeAll(pings));
+        }
     }
 }

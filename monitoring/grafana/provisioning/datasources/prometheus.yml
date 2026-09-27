@@ -1,0 +1,11 @@
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    # Container-to-container, so the compose service name resolves directly.
+    # No host.docker.internal needed here — that's only for reaching the HOST.
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

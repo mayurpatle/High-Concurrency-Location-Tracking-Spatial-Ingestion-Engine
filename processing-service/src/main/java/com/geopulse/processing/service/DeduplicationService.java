@@ -1,19 +1,25 @@
 package com.geopulse.processing.service;
 
+import com.geopulse.common.model.LocationPing;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
-import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Suppresses duplicate pings using shared state in Redis.
  *
- * WHY Redis and not a HashSet: a partition can move to another instance during
- * a rebalance. In-memory dedup state doesn't move with it, so the new owner
- * would reprocess everything — which is EXACTLY the scenario dedup exists to
- * prevent. Dedup state must outlive partition ownership, so it must be shared.
+ * BATCHED as of Phase 6.3. The per-record version did one round trip per
+ * record — 500 × ~0.3ms = ~150ms of SEQUENTIAL latency per batch, before the
+ * batched write even started. That was ~83% of measured Redis write latency.
+ *
+ * Still Redis rather than a HashMap: a partition can move to another instance
+ * during a rebalance, and in-memory dedup state doesn't move with it — so it
+ * would fail exactly when you need it (D-24).
  */
 @Service
 @RequiredArgsConstructor
@@ -27,32 +33,56 @@ public class DeduplicationService {
     private long ttlSeconds;
 
     /**
-     * Atomically claim this ping. Returns true if WE are the first to see it
-     * (process it), false if someone already claimed it (skip).
+     * Claim a whole batch in ONE round trip.
      *
-     * setIfAbsent() maps to Redis `SET key val NX EX ttl` — a SINGLE atomic
-     * operation that both CHECKS and CLAIMS. A separate exists()-then-set()
-     * would race: two threads could both see "absent" and both proceed.
+     * @return a parallel list: true at index i means WE claimed pings[i] and
+     *         should process it; false means someone already did.
      *
-     * The TTL is what makes this affordable. Without expiry we'd accumulate
-     * 21.6 BILLION keys/day. At 5 minutes we hold ~75M keys (~5-7GB) — bounded.
-     * The tradeoff, stated plainly: this window is NOT absolute. A duplicate
-     * arriving 6 minutes late slips through. Sized to cover realistic
-     * redelivery paths (rebalance = seconds, retries = ms) with margin.
+     * The ordering contract matters — executePipelined returns results in the
+     * order commands were queued, so index i of the result corresponds to
+     * index i of the input. Correlating by position is what makes this work
+     * without sending the key back and forth.
      */
-    public boolean claim(String driverId, long timestamp) {
+    public List<Boolean> claimAll(List<LocationPing> pings) {
+        if (pings.isEmpty()) {
+            return List.of();
+        }
+
+        List<Object> results = redis.executePipelined((RedisCallback<Object>) connection -> {
+            for (LocationPing ping : pings) {
+                // SET key "1" NX EX ttl — still one atomic check-and-claim per
+                // ping, just no longer one ROUND TRIP per ping. The atomicity
+                // is per-command and unaffected by pipelining; only the network
+                // cost is amortized.
+                connection.stringCommands().set(
+                        key(ping).getBytes(),
+                        "1".getBytes(),
+                        org.springframework.data.redis.core.types.Expiration.seconds(ttlSeconds),
+                        org.springframework.data.redis.connection.RedisStringCommands.SetOption.ifAbsent());
+            }
+            return null;
+        });
+
+        List<Boolean> claimed = new ArrayList<>(pings.size());
+        for (int i = 0; i < pings.size(); i++) {
+            Object r = (i < results.size()) ? results.get(i) : null;
+
+            // SET NX returns true when it set the key (we claimed it), false
+            // when the key already existed.
+            //
+            // A NULL means the command itself failed. FAIL OPEN — treat it as
+            // claimed and process the ping. If Redis is misbehaving we'd rather
+            // process a possible duplicate than drop data. A duplicate is a
+            // minor data-quality issue; dropping every ping is an outage (D-26).
+            claimed.add(r == null || Boolean.TRUE.equals(r));
+        }
+        return claimed;
+    }
+
+    private String key(LocationPing ping) {
         // The BUSINESS identity, not the transport identity. Kafka offsets
-        // would catch rebalance duplicates but NOT a client that retried its
-        // POST and produced two distinct Kafka messages. This key catches both.
-        String key = KEY_PREFIX + driverId + ":" + timestamp;
-
-        Boolean claimed = redis.opsForValue()
-                .setIfAbsent(key, "1", Duration.ofSeconds(ttlSeconds));
-
-        // Null means the Redis call itself failed. Fail OPEN (treat as claimed)
-        // rather than closed: if Redis is down we'd rather process a possible
-        // duplicate than drop every ping. Availability over perfect dedup —
-        // consistent with every other choice in this system.
-        return claimed == null || claimed;
+        // would catch rebalance duplicates but not a client that retried its
+        // POST and produced two distinct Kafka messages.
+        return KEY_PREFIX + ping.driverId() + ":" + ping.timestamp();
     }
 }

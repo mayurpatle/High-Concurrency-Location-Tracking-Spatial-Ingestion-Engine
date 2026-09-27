@@ -1,6 +1,7 @@
 package com.geopulse.ingestion.kafka;
 
 import com.geopulse.common.model.LocationPing;
+import com.geopulse.ingestion.metrics.IngestionMetrics;
 import com.geopulse.ingestion.service.HotCellRegistry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -28,6 +29,8 @@ public class LocationPingProducer {
     private final KafkaTemplate<String, LocationPing> kafkaTemplate;
 
     private final HotCellRegistry hotCellRegistry    ;
+
+    private final IngestionMetrics metrics;
 
 
     @Value("${geopulse.kafka.topic}")
@@ -65,7 +68,8 @@ public class LocationPingProducer {
                         // the next ping arrives in ~4s. In a payments system
                         // this would need an outbox table or a retry queue.
                         //
-                        // TODO(Phase 6): replace with a `pings.publish.failed`
+                        // TODO(Phase 6): replace with a `pings.publish.failed` done ✅
+                        metrics.publishFailed();
                         // counter. Logging per-failure at 250k/s is a DoS on
                         // ourselves if Kafka goes down and EVERY send fails.
                         log.error("Failed to publish ping for driver={}", ping.driverId(), ex);

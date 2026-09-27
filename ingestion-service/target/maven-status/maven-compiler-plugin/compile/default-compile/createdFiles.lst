@@ -4,4 +4,5 @@ com\geopulse\ingestion\controller\SpatialDebugController.class
 com\geopulse\ingestion\exception\GlobalExceptionHandler.class
 com\geopulse\ingestion\IngestionServiceApplication.class
 com\geopulse\ingestion\controller\LocationController.class
+com\geopulse\ingestion\metrics\IngestionMetrics.class
 com\geopulse\ingestion\service\HotCellRegistry.class

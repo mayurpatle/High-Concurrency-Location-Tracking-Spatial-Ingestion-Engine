@@ -2,6 +2,7 @@ package com.geopulse.processing.kafka;
 
 import com.geopulse.common.model.LocationPing;
 import com.geopulse.processing.exception.NonRetryableException;
+import com.geopulse.processing.metrics.ProcessingMetrics;
 import com.geopulse.processing.service.CassandraHistoryWriter;
 import lombok.RequiredArgsConstructor;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -25,6 +26,7 @@ import java.util.List;
 public class LocationHistoryConsumer {
 
     private final CassandraHistoryWriter historyWriter;
+    private final ProcessingMetrics metrics;
 
     @KafkaListener(
             topics = "${geopulse.kafka.topic}",
@@ -39,6 +41,11 @@ public class LocationHistoryConsumer {
             properties = "auto.offset.reset=earliest"
     )
     public void consume(List<ConsumerRecord<String, LocationPing>> records) {
+
+        // Not tagged by group — the metric name and the `store` tag already
+        // distinguish this from the hot path's Redis writes.
+        metrics.recordBatchSize(records.size());
+
         List<LocationPing> pings = new ArrayList<>(records.size());
 
         for (int i = 0; i < records.size(); i++) {
@@ -52,7 +59,11 @@ public class LocationHistoryConsumer {
                 // be WRITTEN before we throw — otherwise their offsets are
                 // committed for rows that never reached Cassandra, and they are
                 // gone for good.
-                historyWriter.writeAll(pings);
+                //
+                // Timed as well: excluding the error path would quietly remove
+                // the writes most likely to be SLOW from the distribution.
+                metrics.cassandraWriteTimer().record(() -> historyWriter.writeAll(pings));
+
                 throw new BatchListenerFailedException(
                         "Unprocessable record at offset " + record.offset(),
                         new NonRetryableException("null or incomplete payload"), i);
@@ -60,9 +71,15 @@ public class LocationHistoryConsumer {
             pings.add(ping);
         }
 
+        // Timer.record(Runnable) starts a clock, runs the lambda, stops it, and
+        // records the duration. If writeAll throws, the elapsed time is STILL
+        // recorded and the exception propagates normally — which is what we
+        // want: a write that failed after 3 seconds is important data, and
+        // dropping it would make the distribution look healthier than reality.
+        //
         // A driver exception here is NOT a BatchListenerFailedException, so the
-        // whole batch is retried with the patient backoff from 3b — safely,
+        // whole batch is retried with the patient backoff from 4.2 — safely,
         // because every write in it is idempotent.
-        historyWriter.writeAll(pings);
+        metrics.cassandraWriteTimer().record(() -> historyWriter.writeAll(pings));
     }
 }

@@ -96,6 +96,11 @@ spring:
     redis:
       host: localhost
       port: 6379
+      lettuce:
+        pool:
+          max-active: 32
+          max-idle: 16
+          min-idle: 8
   cassandra:
     keyspace-name: geopulse   # the writer's prepared statements use unqualified table names
     request:
@@ -121,7 +126,13 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,prometheus
+  metrics:
+    tags:
+      # Applied to EVERY metric from this service. Without it, three services
+      # scraped into one Prometheus produce indistinguishable series with the
+      # same names — you'd be summing ingestion and query latencies together.
+      application: ${spring.application.name}
   endpoint:
     health:
       show-details: always
@@ -149,5 +160,5 @@ geopulse:
   hotcell:
     scan-interval-ms: 30000
     median-multiplier: 10.0
-    min-pings: 19     # floor; tune against a real load test us this  value as a threshold abive  which salting will occur
+    min-pings: 500    # floor; tune against a real load test us this  value as a threshold abive  which salting will occur
     salt: 4

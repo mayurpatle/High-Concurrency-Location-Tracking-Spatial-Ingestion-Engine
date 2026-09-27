@@ -6,6 +6,9 @@ D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-
 D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\common\src\main\java\com\geopulse\common\dto\TrajectoryPoint.java
 D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\common\src\main\java\com\geopulse\common\dto\TrajectoryResponse.java
 D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\common\src\main\java\com\geopulse\common\history\TimeBuckets.java
+D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\common\src\main\java\com\geopulse\common\lock\DistributedLockService.java
+D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\common\src\main\java\com\geopulse\common\lock\FencedLock.java
+D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\common\src\main\java\com\geopulse\common\lock\FencedWriter.java
 D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\common\src\main\java\com\geopulse\common\model\LocationPing.java
 D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\common\src\main\java\com\geopulse\common\spatial\H3IndexService.java
 D:\Desktop\Springboot Projects\Uber Projects\High-Concurrency-Location-Tracking-Spatial-Ingestion-Engine\common\src\main\java\com\geopulse\common\spatial\H3Resolution.java

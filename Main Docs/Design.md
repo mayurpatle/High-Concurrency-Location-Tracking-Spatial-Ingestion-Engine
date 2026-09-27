@@ -776,16 +776,20 @@ T4 Lock expires           T7 A wakes, writes — no lock left to check
 **D-99 · Token source: single Redis INCR, with the durability caveat named**
 
 - Because: Redis is single-threaded, so INCR is atomic and strictly increasing — adequate for a first implementation.
-- ⚠️ The caveat: ⭐ fencing quality equals counter durability. Redis replication is asynchronous, so a promoted replica that missed the last increments will reissue tokens it already gave out — and a repeated token defeats fencing entirely.
+- ⚠️ The caveat: fencing quality equals counter durability. Redis replication is asynchronous, so a promoted replica that missed the last increments will reissue tokens it already gave out — and a repeated token defeats fencing entirely.
 - 🔹 Mitigated slightly by comparing with >= rather than >, so a repeated token is also rejected.
 - For a true correctness lock: source tokens from a consensus system (ZooKeeper zxid, etcd revision) or a durable DB sequence. TODO(Project 2): decide based on what a double assignment actually costs.
 
 **D-100 · Single-instance Redis, not Redlock**
 
-- Because: ⭐ Redlock is a timing-dependent algorithm being used for a correctness-dependent job. Its safety assumes bounded clock drift and bounded pauses; in an asynchronous system neither is bounded, and when those assumptions break it grants the lock to two holders and doesn't know it.
+- Because: Redlock is a timing-dependent algorithm being used for a correctness-dependent job. Its safety assumes bounded clock drift and bounded pauses; in an asynchronous system neither is bounded, and when those assumptions break it grants the lock to two holders and doesn't know it.
 - Kleppmann's decisive form: with fencing tokens you don't need Redlock (the token catches the failure anyway); without them Redlock doesn't save you (it can still grant concurrent access under a pause). ⭐ Either way the 5-instance complexity buys nothing.
 - Antirez's counter: Redlock targets efficiency locks, where duplicate execution is wasteful but harmless. Fair — and not our case.
 - The synthesis to carry:
+
+
+
+
 
 | | Efficiency lock | Correctness lock |
 |---|---|---|
@@ -807,7 +811,48 @@ T4 Lock expires           T7 A wakes, writes — no lock left to check
 - ⚠️ A false from release() is not an error — the TTL expired and someone else may hold it now. Never treat a successful release as proof your write landed.
 - ⚠️ A rejected fenced write ≠ a failed one. You were legitimately superseded, so the state your decision rested on has changed. Reacquire and re-evaluate — do not retry, or you reapply a decision made from stale data.
 
+**5.9 · Observability**
 
+**D-103 · Measure four things, not forty**
+
+- Because: metrics have real cost — ⚠️ cardinality explosion is a genuine way to take down a monitoring system. Each metric should answer a question you'd actually ask during an incident.
+- The four: throughput (are we working?) · latency distributions (how fast?) · per-partition consumer lag (where is it breaking?) · cell activity skew (is the load even?).
+- Tradeoff: ⚠️ Anything not instrumented is invisible during an incident. We accept narrower coverage in exchange for a monitoring system that survives production volume.
+
+**D-104 · Histogram buckets, never averages or pre-computed percentiles**
+
+- Because: an average of 20 ms is compatible with "everything takes 20 ms" and "1% take 1.5 s." At 250k req/sec a p99 of 1.5 s means 2,500 unhappy requests every second — invisible behind a healthy mean.
+- ⚠️ And percentiles don't aggregate: you cannot average three instances' p99s to get the fleet p99. Bucket counters compose; percentiles don't. Hence publishPercentileHistogram() and histogram_quantile(0.99, sum(rate(..._bucket[5m])) by (le)) — ⭐ that sum by (le) is the entire reason we export buckets.
+- Tradeoff: ⚠️ Buckets cost more series than a single gauge. Mitigated by serviceLevelObjectives(...), which bounds the range to our actual SLOs instead of the default microseconds-to-minutes span.
+
+**D-105 · Consumer lag graphed per partition, never summed**
+
+- Because: total lag of 1,000 across 12 partitions could be 83 each (a harmless burst) or 1,000 on one (a hot cell, and that region going dark). ⚠️ Identical aggregate, opposite situations — and aggregate is what every default dashboard shows you.
+- This is the diagnostic that separates an infrastructure failure from surge manipulation (D-89): supply collapses and that partition's lag climbs → it's you; supply collapses while lag is flat → it's them.
+- 🔹 Free: Spring Kafka registers the client's own metrics with Micrometer when a MeterRegistry is present, already tagged by partition.
+
+**D-106 · Never label a metric with a domain key**
+
+- Because: every unique label combination is a separate time series. driverId (a million) or h3Cell (hundreds of thousands) would produce hundreds of thousands of series per metric.
+- The natural key of your domain is usually the worst possible metric label — and a per-cell metric would be the most useful thing imaginable.
+- The workaround is what we already built: aggregate in the application (D-84's counters), expose only derived figures — max, median, ratio, count-above-threshold. Four bounded series instead of 400,000.
+- Safe labels: partition, topic, store, reason, result, application.
+
+**D-107 · dropped and rejected are separate counters**
+
+- Because: both mean "a ping didn't make it," but dropped = we discarded good-faith data (the quality gate) → a GPS/coverage problem; rejected = the client sent something invalid → a client bug. Different spikes, different pages, different responders.
+- 🔹 The drop path is timed too — it consumed a request thread and returned a 202, so excluding it would make p99 look better than the client's experience.
+
+**D-108 · Freshness is the SLO metric, with a stated clock caveat ⚠️**
+
+- Because: device timestamp → visible in Redis is the only direct measurement of "how stale is now." Ingest latency and lag are merely components of it.
+- ⚠️ It subtracts a client-supplied timestamp from our clock, so a skewed phone yields a negative or enormous value. Hence a filter rejecting ages < 0 or > 5 min — those are data about phones, not about us, and recording them corrupts the distribution — and read the median, not the max.
+- 🔹 Sampled once per batch, not per record. Sampling is legitimate for distributions; never for counters.
+
+**D-109 · Dashboards provisioned as code**
+
+- Because: the dashboard lives in the repo, survives container rebuilds, and is reviewable. Every panel carries a description of what it's for and how to misread it — the dashboard is documentation as much as instrumentation.
+- 🔹 One scrape job with three targets, not three jobs: every service already tags metrics with application, so a job-per-service would add a redundant label. Tag in the application, not the scrape config, when the application knows better.
 
 
 
@@ -857,7 +902,6 @@ Redis:
 | Redis | `hotcells:current` | Set | Cells currently flagged hot | TTL 5 min — safety valve (D-91) |
 
 
-### Add to §6
 
 | Store | Key | Type | Contents |
 |---|---|---|---|
@@ -873,6 +917,20 @@ Storage layout: the partition key is hashed to a token that picks the node — �
 
 The hash is one-way: key → node is trivial, node → key is impossible. That is why a query missing any partition-key component fails with ALLOW FILTERING — the error is the model enforcing itself.
 
+| Metric | Type | Labels | Notes |
+|---|---|---|---|
+| `geopulse.pings.accepted` | Counter | — | Throughput denominator |
+| `geopulse.pings.dropped` | Counter | `reason` | Our quality gate (D-107) |
+| `geopulse.pings.rejected` | Counter | `reason` | Client's fault (D-107) |
+| `geopulse.pings.deduplicated` | Counter | — | ⚠️ A rising rate usually means **rebalances** |
+| `geopulse.kafka.publish.failed` | Counter | — | Pings lost **after** the `202` |
+| `geopulse.ingest.latency` | Timer (buckets) | — | SLO p99 < 50 ms |
+| `geopulse.freshness` | Timer (buckets) | — | SLO p99 < 2 s — ⚠️ read the median |
+| `geopulse.write.latency` | Timer (buckets) | `store` | One name, two stores → they graph together |
+| `geopulse.consumer.batch.size` | DistributionSummary | — | Near 1 = no queue; pinned at 500 = **saturated** |
+| `geopulse.cells.skew.ratio` | Gauge | — | Crossing 10 = the salting trigger |
+| `geopulse.cells.hot.count` | Gauge | — | |
+| `kafka.consumer.…records.lag` | Gauge | **`partition`** | ⭐ **The one that matters (D-105)** |
 
 > Same data, **two Cassandra tables** — query-driven modeling: one schema per access pattern.
 
@@ -978,7 +1036,10 @@ The hash is one-way: key → node is trivial, node → key is impossible. That i
 | **Stale fenced write arrives** | Rejected by the resource | **Reacquire and re-evaluate** | No — ⚠️ retrying would reapply a stale decision |
 | **Redis failover loses `INCR`s** | ⚠️ **Token reissued → fencing defeated** | ⚠️ Not handled — consensus source needed | ⚠️ **Yes, potentially** — the one failure mode this design can't absorb |
 | **Resource can't check tokens (external API)** | ⚠️ Lock is **advisory only** | Idempotency key at the provider | ⚠️ Possible double execution |
-
+| **Client clock skew** | ⚠️ Absurd freshness values filtered out, not recorded | — | No — ⭐ they're data about phones, not us |
+| **Scrape slower than the interval** | ⚠️ Prometheus **misses samples** | Reduce series or lengthen the interval | Metrics only |
+| **Gauge source garbage-collected** | 🐍 Reports `NaN` forever, silently | Hold the source in a field | Metrics only |
+| **Metrics endpoint unavailable** | ⚠️ Blind, but the pipeline is unaffected | — | No — derived data (D-87) |
 ---
 
 ## 8. Configuration reference
@@ -1034,7 +1095,11 @@ The hash is one-way: key → node is trivial, node → key is impossible. That i
 | Lock TTL (10s in the Project 2 sketch) | **Chosen** — ⚠️ there is no correct value; a trade between duplicate execution and stalled work |
 | Fence comparison `>=` not `>` | **Derived** — also rejects a repeated token from the D-99 replication failure |
 | Single Redis for tokens | **Chosen for now**, with the durability caveat documented (D-99) |
-
+| `scrape_interval = 15s` | **Prometheus default, kept** |
+| `rate()` window `[1m]` / `[5m]` | **Chosen** — too short is noisy, too long smooths over the spike you're hunting |
+| Ingest SLO buckets (5–250 ms) | **Derived** from the 50 ms p99 SLO |
+| Freshness SLO buckets (0.5–5 s) | **Derived** from the 2 s p99 SLO |
+| Freshness sanity window (0 ... 5 min) | **Chosen** — beyond this is clock skew, not latency |
 
 
 ### The poll-deadline arithmetic
@@ -1073,7 +1138,11 @@ degraded  500 × 800ms = 400s    vs 300s   ❌ EVICTED → rebalance storm
 | `GET`-then-`DEL` release | 🔥 **Not atomic — it is the race.** Use a Lua script comparing the owner ID. |
 | `SET NX` then `INCR` | 🔥 Leaves a window where you hold the lock with **no token**; a crash there strands it. One script. |
 | Cassandra LWT cost | ⚠️ **~4× a normal write (Paxos).** Fine for a rare assignment decision, ruinous on a hot path. |
-
+| **`micrometer-registry-prometheus`** | 🐛 Its **presence is what creates `/actuator/prometheus`**. Without it, `exposure.include: prometheus` names an endpoint that was never registered — **silently**, and the request falls through to static-resource handling as a 404. |
+| **Catch-all `@ExceptionHandler(Exception.class)`** | ⚠️ It **dressed that 404 as a 500**, hiding the real cause. Worth letting `NoResourceFoundException` through as a 404 — otherwise every mistyped URL looks like a server fault. |
+| **Micrometer gauges** | 🐛 Hold only a **weak reference** to the source object. A local variable compiles, runs, and **reports `NaN` forever** once GC runs. Most common Micrometer mistake. |
+| **Mounted config files** | ⚠️ Read at **container start**. `docker compose restart` keeps the old config — use `up -d --force-recreate`. |
+| **Per-batch vs per-record instrumentation** | 🐛 A write timer inside the record loop writes the accumulating list **on every iteration** — 500 progressively-larger writes instead of one. ⭐ **Per-batch outside the loop, per-record inside.** |
 
 
 ---
@@ -1123,6 +1192,12 @@ Everything is built **except the writes themselves.** `toProcess` is assembled a
 -  ⚠️ /v1/admin/hot-cells sits on the public query surface
 - ⚠️ Fencing tokens come from a single Redis INCR — async replication can reissue one (D-99)
 -  ⚠️ DistributedLockService has no caller and therefore no production exercise
+- ⚠️ Every performance number is still an estimate — instrumentation exists, measurement doesn't (6.2)
+-  ⚠️ No alerting rules — metrics are collected but nothing pages on them
+-  ⚠️ No distributed tracing — metrics say that, not why (Phase 7.2)
+-  ⚠️ processing-service scrape duration ~2.35 s; watch it against the interval
+
+
 
 
 
@@ -1276,5 +1351,9 @@ The soundbites worth having ready:
 30. **Why SET NX isn't a lock:** *"A lock guarantees mutual exclusion among processes that are checking it — it can't stop a write already in flight. If a holder stalls past its TTL from a GC pause or a slow network, its write lands after the next holder's and overwrites it, while the lock was working correctly the whole time. You fix that at the resource, not the lock: every acquisition mints a monotonic fencing token, and the resource rejects anything older than it's already seen."*
 31. **The Redlock question:** *"Redlock is a timing-dependent algorithm doing a correctness-dependent job — it assumes bounded clock drift and bounded pauses, and neither is bounded. The decisive form of the argument: with fencing tokens you don't need Redlock, and without them Redlock doesn't save you. The real question is never which lock library, it's what happens if the lock fails. If the answer is wasted CPU, use the simple thing. If it's corrupted data, you need consensus and an enforcing resource."*
 32. **The pattern across the system:** *"Fencing tokens don't prevent the race — they make its outcome correct. That's the same shape as last-write-wins on device timestamps, idempotent Cassandra keys, and additive counter flushes. Four layers, one idea: preventing races is expensive and fragile, making them harmless is cheap and robust."*
-33. 
+33. **Why averages are useless:** *"We export histogram buckets rather than average latency, because an average of 20ms is compatible with everything taking 20ms and with one percent taking a second and a half. At 250k requests a second, a p99 of 1.5s means 2,500 people every second are having a bad time — and the mean reports that as healthy. Buckets also let Prometheus compute a correct fleet-wide p99; averaging per-instance percentiles is mathematically meaningless."*
+34. **Per-partition lag:** *"Aggregate consumer lag can't distinguish a burst from an outage. A thousand messages of lag might be eighty per partition — fine — or a thousand on one, which means a whole region is going dark. We graph it per partition, and that's also the only way to tell an infrastructure failure from drivers gaming surge: if supply collapses while that partition's lag is climbing, it's us."*
+35. **Cardinality discipline:** *"The most useful metric label in our system would be the H3 cell, and it's exactly the one we can't use — hundreds of thousands of time series would take Prometheus down. So we aggregate in the application and publish derived figures: the max, the median, the ratio. Four series instead of four hundred thousand. The natural key of your domain is usually the worst possible metric label."*
+
+
 

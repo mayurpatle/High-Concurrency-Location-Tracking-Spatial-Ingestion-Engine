@@ -1,0 +1,399 @@
+{
+  "uid": "geopulse-main",
+  "title": "GeoPulse \u2014 Ingestion Pipeline",
+  "description": "Four things worth measuring: are we keeping up, how fast are we, where is it breaking, is the load even.",
+  "tags": [
+    "geopulse"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Ingestion latency percentiles",
+      "description": "SLO: p99 < 50ms. Percentiles, not averages \u2014 an average of 20ms is compatible with 'everything takes 20ms' AND '1% take 1.5s'. At 250k/s a p99 of 1.5s means 2,500 unhappy requests EVERY SECOND, invisible behind a healthy mean.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(geopulse_ingest_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(geopulse_ingest_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(geopulse_ingest_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.05
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "title": "End-to-end freshness (device \u2192 Redis)",
+      "description": "SLO: p99 < 2s. THE number that says how stale 'now' is. Depends on the DEVICE clock, so read the median \u2014 the max is dominated by whichever phone has the worst clock.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(geopulse_freshness_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(geopulse_freshness_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "title": "\u2b50 Consumer lag PER PARTITION",
+      "description": "The most important panel here. Graphed per partition, NOT summed: total lag of 1000 across 12 partitions could be 83 each (a harmless burst) or 1000 on one (a hot cell, and that region is going dark). Identical aggregate, opposite situations \u2014 and aggregate is what every default dashboard shows. One line climbing while the others sit flat IS the hot cell.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 9,
+        "w": 16,
+        "x": 0,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "max(kafka_consumer_fetch_manager_records_lag{application=\"processing-service\"}) by (partition, client_id)",
+          "legendFormat": "p{{partition}} \u00b7 {{client_id}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "title": "Cell skew ratio (max \u00f7 median)",
+      "description": "Busiest cell as a multiple of the median. Median, not mean \u2014 a mean is dragged upward by the very outliers we're hunting, so the airport would look 7x above average instead of 50x. Crossing 10 is the salting trigger.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 16,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "geopulse_cells_skew_ratio",
+          "legendFormat": "skew ratio",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "geopulse_cells_hot_count",
+          "legendFormat": "cells flagged hot",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "title": "Ping throughput",
+      "description": "rate() converts a monotonic counter into per-second change \u2014 you almost never graph a counter raw. Accepted vs dropped vs rejected: DROPPED means we discarded good-faith data (the quality gate, so a GPS/coverage problem); REJECTED means the client sent something invalid (a client bug). Different pages, different responders.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 17
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(geopulse_pings_accepted_total[1m]))",
+          "legendFormat": "accepted",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "sum(rate(geopulse_pings_dropped_total[1m]))",
+          "legendFormat": "dropped (low accuracy)",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "sum(rate(geopulse_pings_rejected_total[1m]))",
+          "legendFormat": "rejected (validation)",
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "sum(rate(geopulse_pings_deduplicated_total[1m]))",
+          "legendFormat": "deduplicated",
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "title": "Write latency by store",
+      "description": "One metric name, two stores, distinguished by tag \u2014 so they graph together and compare directly. Cassandra should be visibly slower than Redis; if Redis approaches Cassandra, something is wrong with the hot path.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 17
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(geopulse_write_latency_seconds_bucket[5m])) by (le, store))",
+          "legendFormat": "p99 {{store}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "title": "Consumer batch size distribution",
+      "description": "The batching economics made visible. Batches near 1 mean there is no queue, so the ~25x round-trip saving never materialises \u2014 expected at low traffic. Batches PINNED at max-poll-records (500) mean we are saturated and falling behind, not merely busy.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 25
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(geopulse_consumer_batch_size_bucket[5m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(geopulse_consumer_batch_size_bucket[5m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "title": "Kafka publish failures",
+      "description": "Counted, never logged. If Kafka goes down EVERY send fails, and per-failure logging at 250k/s would be a self-inflicted DoS. Any sustained non-zero value here means pings are being lost after the 202 was already returned \u2014 acceptable only because location data self-heals.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 25
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(geopulse_kafka_publish_failed_total[1m]))",
+          "legendFormat": "publish failures/sec",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

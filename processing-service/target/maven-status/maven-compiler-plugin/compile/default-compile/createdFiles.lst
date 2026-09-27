@@ -3,6 +3,7 @@ com\geopulse\processing\config\HistoryListenerConfig.class
 com\geopulse\processing\exception\NonRetryableException.class
 com\geopulse\processing\service\CassandraHistoryWriter.class
 com\geopulse\processing\kafka\ActivityFlushRebalanceListener.class
+com\geopulse\processing\metrics\ProcessingMetrics.class
 com\geopulse\processing\service\HotCellDetector.class
 com\geopulse\processing\service\DeduplicationService.class
 com\geopulse\processing\service\RedisLocationWriter.class

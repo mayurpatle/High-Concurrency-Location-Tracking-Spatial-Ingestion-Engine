@@ -81,7 +81,13 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,prometheus
+  metrics:
+    tags:
+      # Applied to EVERY metric from this service. Without it, three services
+      # scraped into one Prometheus produce indistinguishable series with the
+      # same names — you'd be summing ingestion and query latencies together.
+      application: ${spring.application.name}
   endpoint:
     health:
       show-details: always   # show per-component status (dev convenience)

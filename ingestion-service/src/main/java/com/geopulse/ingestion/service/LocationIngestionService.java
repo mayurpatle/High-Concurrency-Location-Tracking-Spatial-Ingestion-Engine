@@ -4,6 +4,9 @@ import com.geopulse.common.dto.LocationPingRequest;
 import com.geopulse.common.model.LocationPing;
 import com.geopulse.common.spatial.H3IndexService;
 import com.geopulse.ingestion.kafka.LocationPingProducer;
+import com.geopulse.ingestion.metrics.IngestionMetrics;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -31,6 +34,9 @@ public class LocationIngestionService {
 
     private final LocationPingProducer locationPingProducer  ;
 
+    private final IngestionMetrics metrics;
+    private final MeterRegistry registry;
+
 
 
     /**
@@ -53,6 +59,10 @@ public class LocationIngestionService {
 
     public void ingest(LocationPingRequest request) {
 
+        Timer.Sample sample = Timer.start(registry);
+
+
+
         // ---- QUALITY GATE ----
         // A ping with a huge error radius (tunnel, urban canyon, bad fix) is worse
         // than no ping: it would overwrite a good position with a vague one.
@@ -62,7 +72,10 @@ public class LocationIngestionService {
         // It still gets a 202. This is "accept and discard", and it's safe precisely
         // because location data is SELF-HEALING: a better fix arrives in ~4 seconds.
         if (request.accuracy() != null && request.accuracy() > maxAccuracyMetres) {
-            // TODO(Phase 6): increment a `pings.dropped{reason="low_accuracy"}` counter.
+            // TODO(Phase 6): increment a `pings.dropped{reason="low_accuracy"}` counter. done ✅
+            metrics.droppedLowAccuracy();
+            metrics.recordLatency(sample);
+
             // Counting > logging on the hot path.
             return;
         }
@@ -97,6 +110,9 @@ public class LocationIngestionService {
         // TODO(1.3): publish to Kafka        -> kafkaTemplate.send(TOPIC, key, ping) - done ✅
 
         locationPingProducer.publish(ping);
+
+        metrics.accepted();
+        metrics.recordLatency(sample);
 
 
         // Placeholder so we can SEE the pipeline work end-to-end today.
